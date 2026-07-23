@@ -156,6 +156,7 @@ add_subdirectory(ri)
 #add_subdirectory(localizer)
 add_subdirectory(pbc)
 add_subdirectory(agf2)
+add_subdirectory(pari)
 
 option(ENABLE_SMD "Compiling SMD Fortran code" OFF)
 if(ENABLE_SMD)
