@@ -1,0 +1,243 @@
+#!/usr/bin/env python
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Author: Hong-Zhou Ye <hzyechem@gmail.com>
+#
+
+import numpy
+
+from pyscf import lib
+from pyscf.df import df_jk
+from pyscf.lib import logger
+
+
+def get_j(mypari, dm, hermi=1, direct_scf_tol=1e-13, omega=None):
+    if omega is not None:
+        raise NotImplementedError('range-separated Coulomb is not supported')
+
+    mypari._build_auxmol()
+    mydf = mypari._j_df
+    mydf.max_memory = mypari.max_memory
+    mydf.stdout = mypari.stdout
+    mydf.verbose = mypari.verbose
+    vj = df_jk.get_j(mydf, dm, hermi, direct_scf_tol)
+    return vj
+
+
+def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
+    if omega is not None:
+        raise NotImplementedError('range-separated exchange is not supported')
+    if hermi != 1:
+        raise NotImplementedError('PARI K only supports hermi=1')
+
+    dm_tag = dm
+    dm = numpy.asarray(dm)
+    nao = mypari.mol.nao_nr()
+    if dm.shape != (nao, nao):
+        raise NotImplementedError('PARI K only supports one density matrix')
+    if numpy.iscomplexobj(dm):
+        raise NotImplementedError('complex density matrices are not supported')
+
+    if mo_coeff is None:
+        mo_coeff = getattr(dm_tag, 'mo_coeff', None)
+        if mo_occ is None:
+            mo_occ = getattr(dm_tag, 'mo_occ', None)
+    mo_coeff = _factor_dm(dm, mo_coeff, mo_occ)
+    if numpy.iscomplexobj(mo_coeff):
+        raise NotImplementedError('complex orbitals are not supported')
+
+    if mypari.df_coeff is None:
+        mypari.build()
+
+    t0 = (logger.process_clock(), logger.perf_counter())
+    log = logger.new_logger(mypari)
+    mol = mypari.mol
+    auxmol = mypari.auxmol
+    layout = mypari.aopair_layout
+    df_coeff = mypari.df_coeff
+    j2c = mypari.j2c
+    auxslice = auxmol.aoslice_by_atom()
+    nocc = mo_coeff.shape[1]
+
+    tspans = numpy.zeros((5,2))
+    dtype = numpy.result_type(mo_coeff, j2c)
+    max_naux = numpy.max(auxslice[:,3] - auxslice[:,2])
+    Dbuf = numpy.empty((max_naux,nocc,nao), dtype=dtype)
+    Hbuf = numpy.empty((max_naux,nocc,nao), dtype=dtype)
+    Gbuf = numpy.empty(layout.naopair*max_naux)
+    Lmat = numpy.zeros((nao, nao), dtype=dtype)
+    for A in range(mol.natm):
+        aux0, aux1 = auxslice[A,2:]
+        naux_A = aux1 - aux0
+        tick = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        Dmat = Dbuf[:naux_A]
+        Hmat = Hbuf[:naux_A]
+        Dmat.fill(0)
+        Hmat.fill(0)
+        tock = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        tspans[0] += tock - tick
+
+        tick = tock
+        out = Gbuf[:layout.naopair*naux_A]
+        j3c = mypari.fill_aux_e2_sparse(A, out=out)
+        tock = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        tspans[1] += tock - tick
+
+        for pair, (B, C) in enumerate(layout.pair_atoms):
+            pair0, pair1 = layout.pair_aopair_loc[pair:pair+2]
+            pair_slice = slice(pair0, pair1)
+
+            if A == B:
+                tick = numpy.asarray(
+                    (logger.process_clock(), logger.perf_counter()))
+                _ao_to_mo(Dmat, mo_coeff, df_coeff.left(B, C),
+                          layout, pair)
+                tock = numpy.asarray(
+                    (logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
+            elif A == C:
+                tick = numpy.asarray(
+                    (logger.process_clock(), logger.perf_counter()))
+                _ao_to_mo(Dmat, mo_coeff, df_coeff.right(B, C),
+                          layout, pair)
+                tock = numpy.asarray(
+                    (logger.process_clock(), logger.perf_counter()))
+                tspans[0] += tock - tick
+
+            tick = numpy.asarray(
+                (logger.process_clock(), logger.perf_counter()))
+            Gmat = j3c[pair_slice]
+            auxB = slice(*auxslice[B,2:])
+            Gmat -= .5 * lib.dot(
+                df_coeff.left(B, C), j2c[auxB,aux0:aux1])
+            if B != C:
+                auxC = slice(*auxslice[C,2:])
+                Gmat -= .5 * lib.dot(
+                    df_coeff.right(B, C), j2c[auxC,aux0:aux1])
+            tock = numpy.asarray(
+                (logger.process_clock(), logger.perf_counter()))
+            tspans[2] += tock - tick
+
+            tick = tock
+            _ao_to_mo(Hmat, mo_coeff, Gmat, layout, pair)
+            tock = numpy.asarray(
+                (logger.process_clock(), logger.perf_counter()))
+            tspans[3] += tock - tick
+
+        tick = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        Lmat += lib.einsum('pim,pin->mn', Dmat, Hmat)
+        tock = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        tspans[4] += tock - tick
+
+    vk = Lmat + Lmat.T
+    tnames = ('Dmat', 'Gmat', 'Emat', 'Hmat', 'Lmat')
+    for name, tspan in zip(tnames, tspans):
+        cpu0 = logger.process_clock() - tspan[0]
+        wall0 = logger.perf_counter() - tspan[1]
+        log.timer('PARI K ' + name, cpu0, wall0)
+
+    pair_nshlpr = numpy.diff(layout.shlpr_loc)
+    pair_factor = 2 - (layout.pair_atoms[:,0] ==
+                       layout.pair_atoms[:,1])
+    shl_factor = 2 - (layout.shlpr[:,0] == layout.shlpr[:,1])
+    if layout.npair:
+        pair_einsum = numpy.add.reduceat(
+            shl_factor, layout.shlpr_loc[:-1])
+    else:
+        pair_einsum = numpy.zeros(0, dtype=numpy.int64)
+    log.debug('PARI K calls: D %d atom-pair/%d shell-pair/%d einsum; '
+              'E %d metric products; '
+              'H %d atom-pair/%d shell-pair/%d einsum',
+              pair_factor.sum(), numpy.dot(pair_factor, pair_nshlpr),
+              numpy.dot(pair_factor, pair_einsum),
+              mol.natm*pair_factor.sum(),
+              mol.natm*layout.npair, mol.natm*layout.nshlpr,
+              mol.natm*shl_factor.sum())
+    log.timer('PARI K', *t0)
+    return vk
+
+
+def get_jk(mypari, dm, hermi=1, with_j=True, with_k=True,
+           direct_scf_tol=1e-13, mo_coeff=None, mo_occ=None, omega=None):
+    vj = vk = None
+    if with_j:
+        vj = get_j(mypari, dm, hermi, direct_scf_tol, omega)
+    if with_k:
+        vk = get_k(mypari, dm, hermi, mo_coeff, mo_occ, omega)
+    return vj, vk
+
+
+def _factor_dm(dm, mo_coeff=None, mo_occ=None):
+    if mo_coeff is not None and mo_occ is not None:
+        mo_coeff = numpy.asarray(mo_coeff)
+        mo_occ = numpy.asarray(mo_occ)
+        if mo_coeff.ndim != 2 or mo_coeff.shape[0] != dm.shape[0]:
+            raise ValueError('mo_coeff has incompatible shape')
+        if mo_occ.shape != (mo_coeff.shape[1],):
+            raise ValueError('mo_occ has incompatible shape')
+        if numpy.any(mo_occ < -1e-12):
+            raise ValueError('negative occupations are not supported')
+        mask = mo_occ > 1e-12
+        return mo_coeff[:,mask] * numpy.sqrt(mo_occ[mask])
+
+    if mo_coeff is not None:
+        mo_coeff = numpy.asarray(mo_coeff)
+        if (mo_coeff.ndim == 2 and mo_coeff.shape[0] == dm.shape[0] and
+            mo_coeff.shape[1] <= dm.shape[1]):
+            dm1 = lib.dot(mo_coeff, mo_coeff.T)
+            if numpy.allclose(dm1, dm, rtol=1e-8, atol=1e-10):
+                return mo_coeff
+
+    occ, coeff = numpy.linalg.eigh(dm)
+    if occ[0] < -1e-10:
+        raise ValueError('density matrix is not positive semidefinite')
+    mask = occ > 1e-12
+    return coeff[:,mask] * numpy.sqrt(occ[mask])
+
+
+def _ao_to_mo(out, mo_coeff, packed, layout, pair):
+    shlpr0, shlpr1 = layout.shlpr_loc[pair:pair+2]
+    aopair0 = layout.aopair_loc[shlpr0]
+    ao_loc = layout.ao_loc
+
+    for ijsh in range(shlpr0, shlpr1):
+        ish, jsh = layout.shlpr[ijsh]
+        i0, i1 = ao_loc[ish:ish+2]
+        j0, j1 = ao_loc[jsh:jsh+2]
+        row0 = layout.aopair_loc[ijsh] - aopair0
+        row1 = layout.aopair_loc[ijsh+1] - aopair0
+        block = packed[row0:row1]
+
+        di = i1 - i0
+        dj = j1 - j0
+        naux = packed.shape[1]
+        if ish == jsh:
+            buf = numpy.zeros((di, dj, naux), dtype=packed.dtype)
+            idx = numpy.triu_indices(di)
+            buf[idx] = block
+            buf[(idx[1],idx[0])] = block
+            out[:,:,j0:j1] += lib.einsum(
+                'si,smp->pim', mo_coeff[i0:i1], buf)
+        else:
+            buf = block.reshape(di, dj, naux)
+            out[:,:,j0:j1] += lib.einsum(
+                'si,smp->pim', mo_coeff[i0:i1], buf)
+            out[:,:,i0:i1] += lib.einsum(
+                'mi,smp->pis', mo_coeff[j0:j1], buf)
