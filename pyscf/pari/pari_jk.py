@@ -71,83 +71,89 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
     auxslice = auxmol.aoslice_by_atom()
     nocc = mo_coeff.shape[1]
 
-    tspans = numpy.zeros((5,2))
+    tnames = ('Dmat', 'Gmat', 'Emat', 'Gunpack', 'Hmat', 'Lmat')
+    tspans = numpy.zeros((6,2))
     dtype = numpy.result_type(mo_coeff, j2c)
     max_naux = numpy.max(auxslice[:,3] - auxslice[:,2])
-    Dbuf = numpy.empty((max_naux,nocc,nao), dtype=dtype)
-    Hbuf = numpy.empty((max_naux,nocc,nao), dtype=dtype)
-    Gbuf = numpy.empty(layout.naopair*max_naux)
+    moT = numpy.asarray(mo_coeff.T, dtype=dtype, order='C')
+    # Dense work arrays use (AO,aux,AO) and (occ,aux,AO).
+    Dbuf = numpy.empty(nocc*max_naux*nao, dtype=dtype)
+    Hbuf = numpy.empty(nocc*max_naux*nao, dtype=dtype)
+    Gbuf = numpy.empty(nao*max_naux*nao, dtype=dtype)
+    j3cbuf = numpy.empty(layout.naopair*max_naux, dtype=dtype)
     Lmat = numpy.zeros((nao, nao), dtype=dtype)
     for A in range(mol.natm):
         aux0, aux1 = auxslice[A,2:]
         naux_A = aux1 - aux0
         tick = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
-        Dmat = Dbuf[:naux_A]
-        Hmat = Hbuf[:naux_A]
-        Dmat.fill(0)
-        Hmat.fill(0)
+        Dmat = Dbuf[:nocc*naux_A*nao].reshape(nocc,naux_A,nao)
+        Gmat = Gbuf[:nao*naux_A*nao].reshape(nao,naux_A,nao)
+        Gmat.fill(0)
+        for pair, (B, C) in enumerate(layout.pair_atoms):
+            if A == B:
+                _unpack_aopair(
+                    Gmat, df_coeff.left(B, C), layout, pair)
+            elif A == C:
+                _unpack_aopair(
+                    Gmat, df_coeff.right(B, C), layout, pair)
+        lib.dot(moT, Gmat.reshape(nao,naux_A*nao),
+                c=Dmat.reshape(nocc,naux_A*nao))
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
-        tspans[0] += tock - tick
+        tspans[0] += tock - tick    # Dmat
 
         tick = tock
-        out = Gbuf[:layout.naopair*naux_A]
+        out = j3cbuf[:layout.naopair*naux_A]
         j3c = mypari.fill_aux_e2_sparse(A, out=out)
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
-        tspans[1] += tock - tick
+        tspans[1] += tock - tick    # Gmat
 
+        tick = tock
         for pair, (B, C) in enumerate(layout.pair_atoms):
             pair0, pair1 = layout.pair_aopair_loc[pair:pair+2]
             pair_slice = slice(pair0, pair1)
 
-            if A == B:
-                tick = numpy.asarray(
-                    (logger.process_clock(), logger.perf_counter()))
-                _ao_to_mo(Dmat, mo_coeff, df_coeff.left(B, C),
-                          layout, pair)
-                tock = numpy.asarray(
-                    (logger.process_clock(), logger.perf_counter()))
-                tspans[0] += tock - tick
-            elif A == C:
-                tick = numpy.asarray(
-                    (logger.process_clock(), logger.perf_counter()))
-                _ao_to_mo(Dmat, mo_coeff, df_coeff.right(B, C),
-                          layout, pair)
-                tock = numpy.asarray(
-                    (logger.process_clock(), logger.perf_counter()))
-                tspans[0] += tock - tick
-
-            tick = numpy.asarray(
-                (logger.process_clock(), logger.perf_counter()))
-            Gmat = j3c[pair_slice]
+            Gpair = j3c[pair_slice]
             auxB = slice(*auxslice[B,2:])
-            Gmat -= .5 * lib.dot(
+            Gpair -= .5 * lib.dot(
                 df_coeff.left(B, C), j2c[auxB,aux0:aux1])
             if B != C:
                 auxC = slice(*auxslice[C,2:])
-                Gmat -= .5 * lib.dot(
+                Gpair -= .5 * lib.dot(
                     df_coeff.right(B, C), j2c[auxC,aux0:aux1])
-            tock = numpy.asarray(
-                (logger.process_clock(), logger.perf_counter()))
-            tspans[2] += tock - tick
+        tock = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        tspans[2] += tock - tick    # Emat
 
-            tick = tock
-            _ao_to_mo(Hmat, mo_coeff, Gmat, layout, pair)
-            tock = numpy.asarray(
-                (logger.process_clock(), logger.perf_counter()))
-            tspans[3] += tock - tick
+        tick = tock
+        Gmat.fill(0)
+        for pair in range(layout.npair):
+            pair0, pair1 = layout.pair_aopair_loc[pair:pair+2]
+            _unpack_aopair(
+                Gmat, j3c[pair0:pair1], layout, pair)
+        tock = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        tspans[3] += tock - tick    # Gunpack
+
+        tick = tock
+        Hmat = Hbuf[:nocc*naux_A*nao].reshape(nocc,naux_A,nao)
+        lib.dot(moT, Gmat.reshape(nao,naux_A*nao),
+                c=Hmat.reshape(nocc,naux_A*nao))
+        tock = numpy.asarray(
+            (logger.process_clock(), logger.perf_counter()))
+        tspans[4] += tock - tick    # Hmat
 
         tick = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
-        Lmat += lib.einsum('pim,pin->mn', Dmat, Hmat)
+        lib.dot(Dmat.reshape(nocc*naux_A,nao).T,
+                Hmat.reshape(nocc*naux_A,nao), c=Lmat, beta=1)
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
-        tspans[4] += tock - tick
+        tspans[5] += tock - tick    # Lmat
 
     vk = Lmat + Lmat.T
-    tnames = ('Dmat', 'Gmat', 'Emat', 'Hmat', 'Lmat')
     for name, tspan in zip(tnames, tspans):
         cpu0 = logger.process_clock() - tspan[0]
         wall0 = logger.perf_counter() - tspan[1]
@@ -156,20 +162,12 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
     pair_nshlpr = numpy.diff(layout.shlpr_loc)
     pair_factor = 2 - (layout.pair_atoms[:,0] ==
                        layout.pair_atoms[:,1])
-    shl_factor = 2 - (layout.shlpr[:,0] == layout.shlpr[:,1])
-    if layout.npair:
-        pair_einsum = numpy.add.reduceat(
-            shl_factor, layout.shlpr_loc[:-1])
-    else:
-        pair_einsum = numpy.zeros(0, dtype=numpy.int64)
-    log.debug('PARI K calls: D %d atom-pair/%d shell-pair/%d einsum; '
-              'E %d metric products; '
-              'H %d atom-pair/%d shell-pair/%d einsum',
-              pair_factor.sum(), numpy.dot(pair_factor, pair_nshlpr),
-              numpy.dot(pair_factor, pair_einsum),
+    log.debug('PARI K calls: D %d shell-pair scatter/%d dgemm; '
+              'E %d metric products; G %d shell-pair unpack; '
+              'H %d dgemm; L %d dgemm',
+              numpy.dot(pair_factor, pair_nshlpr), mol.natm,
               mol.natm*pair_factor.sum(),
-              mol.natm*layout.npair, mol.natm*layout.nshlpr,
-              mol.natm*shl_factor.sum())
+              mol.natm*layout.nshlpr, mol.natm, mol.natm)
     log.timer('PARI K', *t0)
     return vk
 
@@ -212,7 +210,7 @@ def _factor_dm(dm, mo_coeff=None, mo_occ=None):
     return coeff[:,mask] * numpy.sqrt(occ[mask])
 
 
-def _ao_to_mo(out, mo_coeff, packed, layout, pair):
+def _unpack_aopair(out, packed, layout, pair):
     shlpr0, shlpr1 = layout.shlpr_loc[pair:pair+2]
     aopair0 = layout.aopair_loc[shlpr0]
     ao_loc = layout.ao_loc
@@ -229,15 +227,12 @@ def _ao_to_mo(out, mo_coeff, packed, layout, pair):
         dj = j1 - j0
         naux = packed.shape[1]
         if ish == jsh:
-            buf = numpy.zeros((di, dj, naux), dtype=packed.dtype)
+            buf = numpy.empty((di, dj, naux), dtype=packed.dtype)
             idx = numpy.triu_indices(di)
             buf[idx] = block
             buf[(idx[1],idx[0])] = block
-            out[:,:,j0:j1] += lib.einsum(
-                'si,smp->pim', mo_coeff[i0:i1], buf)
+            out[i0:i1,:,j0:j1] = buf.transpose(0,2,1)
         else:
             buf = block.reshape(di, dj, naux)
-            out[:,:,j0:j1] += lib.einsum(
-                'si,smp->pim', mo_coeff[i0:i1], buf)
-            out[:,:,i0:i1] += lib.einsum(
-                'mi,smp->pis', mo_coeff[j0:j1], buf)
+            out[i0:i1,:,j0:j1] = buf.transpose(0,2,1)
+            out[j0:j1,:,i0:i1] = buf.transpose(1,2,0)

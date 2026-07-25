@@ -457,14 +457,15 @@ class PARI(lib.StreamObject):
         nocc = mol.nelectron // 2
         max_naux = naux_by_atom.max(initial=0)
         buf_mem = max_naux * (
-            2*nocc*nao + layout.naopair) * itemsize
+            2*nocc*nao + nao**2 + layout.naopair) * itemsize
         metric_mem = self.j2c.nbytes
         matrix_mem = 2 * nao**2 * itemsize
         peak_mem = coeff_mem + metric_mem + buf_mem + matrix_mem
         log.info('Estimated PARI K peak memory = %.2f MB (nocc = %d)',
                  peak_mem/1e6, nocc)
-        log.info('  coefficients %.2f MB, j2c %.2f MB, D/H/G buffers '
-                 '%.2f MB, L/K matrices %.2f MB',
+        log.info('  coefficients %.2f MB, j2c %.2f MB, '
+                 'D/H/dense-G/packed-G buffers %.2f MB, '
+                 'L/K matrices %.2f MB',
                  coeff_mem/1e6, metric_mem/1e6, buf_mem/1e6,
                  matrix_mem/1e6)
         log.info('  excluding the DF-J cache and caller-owned dm/mo_coeff')
