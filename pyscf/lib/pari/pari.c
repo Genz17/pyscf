@@ -22,6 +22,7 @@
 #include "config.h"
 #include "cint.h"
 #include "cint_funcs.h"
+#include "vhf/fblas.h"
 
 
 static size_t _max_cache_size(CINTIntegralFunction *intor, int *shls_slice,
@@ -290,5 +291,185 @@ void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
     }
     free(buf);
     free(cache);
+}
+}
+
+
+/*
+ * Unpack selected AO shell pairs to out[nao,naux,nao] in C-order.
+ */
+void PARIunpack(double *out, const double *packed, int nao, int naux,
+                int nshlpr, const int *shlpr,
+                const int64_t *aopair_loc, const int *ao_loc)
+{
+    memset(out, 0, sizeof(double) * (size_t)nao*naux*nao);
+
+#pragma omp parallel for schedule(dynamic, 4)
+    for (int ijsh = 0; ijsh < nshlpr; ijsh++) {
+        const int ish = shlpr[ijsh*2  ];
+        const int jsh = shlpr[ijsh*2+1];
+        const int i0 = ao_loc[ish];
+        const int j0 = ao_loc[jsh];
+        const int di = ao_loc[ish+1] - i0;
+        const int dj = ao_loc[jsh+1] - j0;
+        int64_t row = aopair_loc[ijsh];
+
+        if (ish == jsh) {
+            for (int i = 0; i < di; i++) {
+                for (int j = i; j < dj; j++, row++) {
+                    for (int p = 0; p < naux; p++) {
+                        const double v = packed[(size_t)row*naux+p];
+                        out[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
+                        out[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < di; i++) {
+                for (int j = 0; j < dj; j++, row++) {
+                    for (int p = 0; p < naux; p++) {
+                        const double v = packed[(size_t)row*naux+p];
+                        out[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
+                        out[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/*
+ * Apply the metric correction to packed G[naopair,naux] in C-order.
+ * j2c contains one C-contiguous panel j2c[:,aux_atom].
+ */
+void PARImetric_contract(double *G, const double *coeff,
+                         const double *j2c, int naux, int npair,
+                         const int *pair_atoms,
+                         const int64_t *pair_aopair_loc,
+                         const int64_t *coeff_offsets,
+                         const int64_t *aux_loc)
+{
+    const char TRANS_N = 'N';
+    const double D1 = 1;
+    const double DMHALF = -.5;
+
+#pragma omp parallel for schedule(dynamic, 4)
+    for (int pair = 0; pair < npair; pair++) {
+        const int atom0 = pair_atoms[pair*2  ];
+        const int atom1 = pair_atoms[pair*2+1];
+        const int nrow = pair_aopair_loc[pair+1]
+                       - pair_aopair_loc[pair];
+        const int naux0 = aux_loc[atom0+1] - aux_loc[atom0];
+        double *Gpair = G + (size_t)pair_aopair_loc[pair]*naux;
+        const double *coeff0 = coeff + coeff_offsets[pair*3];
+        const double *j2c0 = j2c + (size_t)aux_loc[atom0]*naux;
+
+        dgemm_(&TRANS_N, &TRANS_N, &naux, &nrow, &naux0,
+               &DMHALF, j2c0, &naux, coeff0, &naux0,
+               &D1, Gpair, &naux);
+
+        if (atom0 != atom1) {
+            const int naux1 = aux_loc[atom1+1] - aux_loc[atom1];
+            const double *coeff1 = coeff + coeff_offsets[pair*3+1];
+            const double *j2c1 = j2c + (size_t)aux_loc[atom1]*naux;
+            dgemm_(&TRANS_N, &TRANS_N, &naux, &nrow, &naux1,
+                   &DMHALF, j2c1, &naux, coeff1, &naux1,
+                   &D1, Gpair, &naux);
+        }
+    }
+}
+
+
+/*
+ * Transform sparse fitting coefficients to dense D[nocc,naux,nao].
+ * Directed shell-pair jobs are grouped by their target AO shell.
+ */
+void PARIbuild_d(double *D, const double *mo_coeff, const double *coeff,
+                 int nocc, int naux, int nao, int nbas,
+                 const int *ao_loc, const int64_t *target_loc,
+                 const int *source_shell, const int64_t *coeff_offset,
+                 const uint8_t *edge_kind)
+{
+    const char TRANS_N = 'N';
+    const char TRANS_T = 'T';
+    const double D1 = 1;
+    int max_shell = 0;
+
+    for (int ish = 0; ish < nbas; ish++) {
+        const int di = ao_loc[ish+1] - ao_loc[ish];
+        if (di > max_shell) {
+            max_shell = di;
+        }
+    }
+    memset(D, 0, sizeof(double) * (size_t)nocc*naux*nao);
+
+#pragma omp parallel
+{
+    double *cbuf = malloc(
+        sizeof(double) * (size_t)max_shell*max_shell*naux);
+    double *dbuf = malloc(
+        sizeof(double) * (size_t)nocc*max_shell*naux);
+
+#pragma omp for schedule(dynamic, 1)
+    for (int tsh = 0; tsh < nbas; tsh++) {
+        const int64_t edge0 = target_loc[tsh];
+        const int64_t edge1 = target_loc[tsh+1];
+        if (edge0 == edge1) {
+            continue;
+        }
+
+        const int t0 = ao_loc[tsh];
+        const int dt = ao_loc[tsh+1] - t0;
+        const int ndp = dt * naux;
+        memset(dbuf, 0, sizeof(double) * (size_t)nocc*ndp);
+
+        for (int64_t edge = edge0; edge < edge1; edge++) {
+            const int ssh = source_shell[edge];
+            const int s0 = ao_loc[ssh];
+            const int ds = ao_loc[ssh+1] - s0;
+            const double *c0 = coeff + coeff_offset[edge];
+            const double *cp = c0;
+
+            if (edge_kind[edge] == 1) {
+                for (int s = 0; s < ds; s++) {
+                    for (int t = 0; t < dt; t++) {
+                        for (int p = 0; p < naux; p++) {
+                            cbuf[((size_t)s*dt+t)*naux+p] =
+                                c0[((size_t)t*ds+s)*naux+p];
+                        }
+                    }
+                }
+                cp = cbuf;
+            } else if (edge_kind[edge] == 2) {
+                int64_t row = 0;
+                for (int s = 0; s < ds; s++) {
+                    for (int t = s; t < dt; t++, row++) {
+                        for (int p = 0; p < naux; p++) {
+                            const double v = c0[(size_t)row*naux+p];
+                            cbuf[((size_t)s*dt+t)*naux+p] = v;
+                            cbuf[((size_t)t*dt+s)*naux+p] = v;
+                        }
+                    }
+                }
+                cp = cbuf;
+            }
+
+            dgemm_(&TRANS_N, &TRANS_T, &ndp, &nocc, &ds,
+                   &D1, cp, &ndp, mo_coeff+(size_t)s0*nocc, &nocc,
+                   &D1, dbuf, &ndp);
+        }
+
+        for (int i = 0; i < nocc; i++) {
+            for (int t = 0; t < dt; t++) {
+                for (int p = 0; p < naux; p++) {
+                    D[((size_t)i*naux+p)*nao+t0+t] =
+                        dbuf[((size_t)i*dt+t)*naux+p];
+                }
+            }
+        }
+    }
+    free(cbuf);
+    free(dbuf);
 }
 }
