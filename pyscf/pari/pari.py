@@ -687,6 +687,12 @@ class PARI(lib.StreamObject):
             (logger.process_clock(), logger.perf_counter()))
         auxmol = self._build_auxmol()
         layout = self._build_aopair_layout()
+        atm, bas, env = gto.mole.conc_env(
+            mol._atm, mol._bas, mol._env,
+            auxmol._atm, auxmol._bas, auxmol._env)
+        intor = mol._add_suffix('int3c2e')
+        cintopt = moleintor.make_cintopt(
+            atm, bas[:mol.nbas], env, intor)
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
         tspans[0] += tock - tick
@@ -702,10 +708,12 @@ class PARI(lib.StreamObject):
         for A, B in layout.pair_atoms:
             tick = numpy.asarray(
                 (logger.process_clock(), logger.perf_counter()))
-            j3c_A = self.fill_aux_e2_sparse(A, (A, B))
+            j3c_A = self.fill_aux_e2_sparse(
+                A, (A, B), cintopt=cintopt)
             j3c_B = None
             if A != B:
-                j3c_B = self.fill_aux_e2_sparse(B, (A, B))
+                j3c_B = self.fill_aux_e2_sparse(
+                    B, (A, B), cintopt=cintopt)
             tock = numpy.asarray(
                 (logger.process_clock(), logger.perf_counter()))
             tspans[2] += tock - tick
