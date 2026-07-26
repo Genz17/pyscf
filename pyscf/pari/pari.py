@@ -29,6 +29,8 @@ from pyscf.lib import logger
 
 libpari = lib.load_library('libpari')
 
+MEMORY_WARN_THRESHOLD = .8
+
 
 class AOPAIR_LAYOUT:
     '''Sparse AO shell-pair layout grouped by canonical atom pairs.'''
@@ -621,6 +623,11 @@ class PARI(lib.StreamObject):
                  dense_buf_mem/1e6)
         log.info('  full fitting j2c requires %.2f MB and is not retained',
                  metric_mem/1e6)
+        if peak_mem/1e6 > MEMORY_WARN_THRESHOLD * self.max_memory:
+            log.warn('Estimated PARI K peak memory %.2f MB is more than '
+                     '%.0f%% of max_memory %.2f MB; available memory may '
+                     'not be enough', peak_mem/1e6,
+                     MEMORY_WARN_THRESHOLD*100, self.max_memory)
         return self
 
     def _build_auxmol(self):

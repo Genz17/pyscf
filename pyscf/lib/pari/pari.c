@@ -531,22 +531,10 @@ void PARIhalf_transform(double *out, const double *mo_coeff,
 }
 
 
-/*
- * Contract NBX-compressed D with dense H and scatter the active AO rows.
- */
-void PARIbuild_l_nbx(double *L, double *buf, const double *D,
-                     const double *H, const int *ao_idx,
-                     int nocc, int naux, int nao, int nactive)
+/* Scatter active AO rows into L. */
+void PARIscatter_l_nbx(double *L, const double *buf, const int *ao_idx,
+                       int nao, int nactive)
 {
-    const char TRANS_N = 'N';
-    const char TRANS_T = 'T';
-    const double D0 = 0;
-    const double D1 = 1;
-    const int ndp = nocc * naux;
-
-    dgemm_(&TRANS_N, &TRANS_T, &nao, &nactive, &ndp,
-           &D1, H, &nao, D, &nactive, &D0, buf, &nao);
-
 #pragma omp parallel for schedule(static)
     for (int ia = 0; ia < nactive; ia++) {
         double *Lrow = L + (size_t)ao_idx[ia]*nao;

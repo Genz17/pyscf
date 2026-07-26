@@ -115,14 +115,14 @@ def _build_l_nbx(L, D, H, ao_idx, out=None):
     buf = numpy.ndarray(
         (len(ao_idx),L.shape[1]), numpy.double, out, order='C')
     if buf.size > 0:
-        pari.libpari.PARIbuild_l_nbx(
+        ndp = D.shape[0] * D.shape[1]
+        lib.dot(D.reshape(ndp,len(ao_idx)).T,
+                H.reshape(ndp,L.shape[1]), c=buf)
+        pari.libpari.PARIscatter_l_nbx(
             L.ctypes.data_as(ctypes.c_void_p),
             buf.ctypes.data_as(ctypes.c_void_p),
-            D.ctypes.data_as(ctypes.c_void_p),
-            H.ctypes.data_as(ctypes.c_void_p),
             ao_idx.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(D.shape[0]), ctypes.c_int(D.shape[1]),
-            ctypes.c_int(H.shape[2]), ctypes.c_int(D.shape[2]))
+            ctypes.c_int(L.shape[1]), ctypes.c_int(len(ao_idx)))
     return L
 
 
