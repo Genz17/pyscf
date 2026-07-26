@@ -145,7 +145,7 @@ void fill_aux_e2(CINTIntegralFunction *intor, double *out, int comp,
 
 static size_t _max_shell_size(int shlpr0, int shlpr1,
                               const int *shlpr, int ksh0, int ksh1,
-                              int *ao_loc)
+                              const int *ao_loc)
 {
     int ijsh, ish, jsh, ksh;
     size_t dij;
@@ -378,6 +378,145 @@ void PARImetric_contract(double *G, const double *coeff,
                    &D1, Gpair, &naux);
         }
     }
+}
+
+
+static void _scatter_pair(double *G, const double *packed,
+                          int nao, int naux, int64_t shlpr0, int64_t shlpr1,
+                          const int *shlpr, const int64_t *aopair_loc,
+                          int64_t aopair0, const int *ao_loc)
+{
+    for (int64_t ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
+        const int ish = shlpr[ijsh*2  ];
+        const int jsh = shlpr[ijsh*2+1];
+        const int i0 = ao_loc[ish];
+        const int j0 = ao_loc[jsh];
+        const int di = ao_loc[ish+1] - i0;
+        const int dj = ao_loc[jsh+1] - j0;
+        int64_t row = aopair_loc[ijsh] - aopair0;
+
+        if (ish == jsh) {
+            for (int i = 0; i < di; i++) {
+                for (int j = i; j < dj; j++, row++) {
+                    for (int p = 0; p < naux; p++) {
+                        const double v = packed[(size_t)row*naux+p];
+                        G[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
+                        G[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < di; i++) {
+                for (int j = 0; j < dj; j++, row++) {
+                    for (int p = 0; p < naux; p++) {
+                        const double v = packed[(size_t)row*naux+p];
+                        G[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
+                        G[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/*
+ * Evaluate, metric-correct, and scatter each canonical AO atom pair.
+ * The output is G[AO1,aux,AO2] in C-order.
+ */
+void PARIfill_g(CINTIntegralFunction *intor, double *G,
+                const double *coeff, const double *j2c,
+                int nao, int naux, int npair, const int *pair_atoms,
+                const int64_t *pair_aopair_loc, const int64_t *shlpr_loc,
+                const int *shlpr, const int64_t *aopair_loc,
+                const int *ao_loc, const int64_t *coeff_offsets,
+                const int64_t *aux_loc, int *shls_slice, CINTOpt *cintopt,
+                int *atm, int natm, int *bas, int nbas, double *env)
+{
+    const char TRANS_N = 'N';
+    const double D1 = 1;
+    const double DMHALF = -.5;
+    const int ksh0 = shls_slice[4];
+    const int ksh1 = shls_slice[5];
+    const size_t cache_size = _max_cache_size(
+        intor, shls_slice, atm, natm, bas, nbas, env);
+    const size_t intbuf_size = _max_shell_size(
+        0, shlpr_loc[npair], shlpr, ksh0, ksh1, ao_loc);
+    int64_t max_nrow = 0;
+
+    for (int pair = 0; pair < npair; pair++) {
+        const int64_t nrow = pair_aopair_loc[pair+1]
+                           - pair_aopair_loc[pair];
+        if (nrow > max_nrow) {
+            max_nrow = nrow;
+        }
+    }
+    memset(G, 0, sizeof(double) * (size_t)nao*naux*nao);
+
+#pragma omp parallel
+{
+    double *gpair = malloc(sizeof(double) * (size_t)max_nrow*naux);
+    double *intbuf = malloc(sizeof(double) * intbuf_size);
+    double *cache = malloc(sizeof(double) * cache_size);
+
+#pragma omp for schedule(dynamic, 1)
+    for (int pair = 0; pair < npair; pair++) {
+        const int atom0 = pair_atoms[pair*2  ];
+        const int atom1 = pair_atoms[pair*2+1];
+        const int64_t aopair0 = pair_aopair_loc[pair];
+        const int nrow = pair_aopair_loc[pair+1] - aopair0;
+        const int64_t shlpr0 = shlpr_loc[pair];
+        const int64_t shlpr1 = shlpr_loc[pair+1];
+        memset(gpair, 0, sizeof(double) * (size_t)nrow*naux);
+
+        for (int64_t ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
+            const int ish = shlpr[ijsh*2  ];
+            const int jsh = shlpr[ijsh*2+1];
+            const int di = ao_loc[ish+1] - ao_loc[ish];
+            const int dj = ao_loc[jsh+1] - ao_loc[jsh];
+            const int64_t row0 = aopair_loc[ijsh] - aopair0;
+            int dims[3] = {di, dj, 0};
+            int shls[3] = {ish, jsh, 0};
+
+            for (int ksh = ksh0; ksh < ksh1; ksh++) {
+                const int dk = ao_loc[ksh+1] - ao_loc[ksh];
+                const int p0 = ao_loc[ksh] - ao_loc[ksh0];
+                dims[2] = dk;
+                shls[2] = ksh;
+                const int has_value = (*intor)(
+                    intbuf, dims, shls, atm, natm, bas, nbas, env,
+                    cintopt, cache);
+                if (has_value) {
+                    _copy_ints_sparse(
+                        gpair, intbuf, 1, row0, p0, di, dj, dk,
+                        naux, nrow, ish == jsh);
+                }
+            }
+        }
+
+        const int naux0 = aux_loc[atom0+1] - aux_loc[atom0];
+        const double *coeff0 = coeff + coeff_offsets[pair*3];
+        const double *j2c0 = j2c + (size_t)aux_loc[atom0]*naux;
+        dgemm_(&TRANS_N, &TRANS_N, &naux, &nrow, &naux0,
+               &DMHALF, j2c0, &naux, coeff0, &naux0,
+               &D1, gpair, &naux);
+
+        if (atom0 != atom1) {
+            const int naux1 = aux_loc[atom1+1] - aux_loc[atom1];
+            const double *coeff1 = coeff + coeff_offsets[pair*3+1];
+            const double *j2c1 = j2c + (size_t)aux_loc[atom1]*naux;
+            dgemm_(&TRANS_N, &TRANS_N, &naux, &nrow, &naux1,
+                   &DMHALF, j2c1, &naux, coeff1, &naux1,
+                   &D1, gpair, &naux);
+        }
+
+        _scatter_pair(G, gpair, nao, naux, shlpr0, shlpr1,
+                      shlpr, aopair_loc, aopair0, ao_loc);
+    }
+    free(gpair);
+    free(intbuf);
+    free(cache);
+}
 }
 
 
