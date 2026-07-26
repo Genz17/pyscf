@@ -295,92 +295,6 @@ void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
 }
 
 
-/*
- * Unpack selected AO shell pairs to out[nao,naux,nao] in C-order.
- */
-void PARIunpack(double *out, const double *packed, int nao, int naux,
-                int nshlpr, const int *shlpr,
-                const int64_t *aopair_loc, const int *ao_loc)
-{
-    memset(out, 0, sizeof(double) * (size_t)nao*naux*nao);
-
-#pragma omp parallel for schedule(dynamic, 4)
-    for (int ijsh = 0; ijsh < nshlpr; ijsh++) {
-        const int ish = shlpr[ijsh*2  ];
-        const int jsh = shlpr[ijsh*2+1];
-        const int i0 = ao_loc[ish];
-        const int j0 = ao_loc[jsh];
-        const int di = ao_loc[ish+1] - i0;
-        const int dj = ao_loc[jsh+1] - j0;
-        int64_t row = aopair_loc[ijsh];
-
-        if (ish == jsh) {
-            for (int i = 0; i < di; i++) {
-                for (int j = i; j < dj; j++, row++) {
-                    for (int p = 0; p < naux; p++) {
-                        const double v = packed[(size_t)row*naux+p];
-                        out[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
-                        out[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
-                    }
-                }
-            }
-        } else {
-            for (int i = 0; i < di; i++) {
-                for (int j = 0; j < dj; j++, row++) {
-                    for (int p = 0; p < naux; p++) {
-                        const double v = packed[(size_t)row*naux+p];
-                        out[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
-                        out[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-/*
- * Apply the metric correction to packed G[naopair,naux] in C-order.
- * j2c contains one C-contiguous panel j2c[:,aux_atom].
- */
-void PARImetric_contract(double *G, const double *coeff,
-                         const double *j2c, int naux, int npair,
-                         const int *pair_atoms,
-                         const int64_t *pair_aopair_loc,
-                         const int64_t *coeff_offsets,
-                         const int64_t *aux_loc)
-{
-    const char TRANS_N = 'N';
-    const double D1 = 1;
-    const double DMHALF = -.5;
-
-#pragma omp parallel for schedule(dynamic, 4)
-    for (int pair = 0; pair < npair; pair++) {
-        const int atom0 = pair_atoms[pair*2  ];
-        const int atom1 = pair_atoms[pair*2+1];
-        const int nrow = pair_aopair_loc[pair+1]
-                       - pair_aopair_loc[pair];
-        const int naux0 = aux_loc[atom0+1] - aux_loc[atom0];
-        double *Gpair = G + (size_t)pair_aopair_loc[pair]*naux;
-        const double *coeff0 = coeff + coeff_offsets[pair*3];
-        const double *j2c0 = j2c + (size_t)aux_loc[atom0]*naux;
-
-        dgemm_(&TRANS_N, &TRANS_N, &naux, &nrow, &naux0,
-               &DMHALF, j2c0, &naux, coeff0, &naux0,
-               &D1, Gpair, &naux);
-
-        if (atom0 != atom1) {
-            const int naux1 = aux_loc[atom1+1] - aux_loc[atom1];
-            const double *coeff1 = coeff + coeff_offsets[pair*3+1];
-            const double *j2c1 = j2c + (size_t)aux_loc[atom1]*naux;
-            dgemm_(&TRANS_N, &TRANS_N, &naux, &nrow, &naux1,
-                   &DMHALF, j2c1, &naux, coeff1, &naux1,
-                   &D1, Gpair, &naux);
-        }
-    }
-}
-
-
 static void _scatter_pair(double *G, const double *packed,
                           int nao, int naux, int64_t shlpr0, int64_t shlpr1,
                           const int *shlpr, const int64_t *aopair_loc,
@@ -521,14 +435,17 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
 
 
 /*
- * Transform sparse fitting coefficients to dense D[nocc,naux,nao].
- * Directed shell-pair jobs are grouped by their target AO shell.
+ * Half-transform sparse fitting coefficients. Directed shell-pair jobs
+ * are grouped by their target AO shell.
  */
-void PARIbuild_d(double *D, const double *mo_coeff, const double *coeff,
-                 int nocc, int naux, int nao, int nbas,
-                 const int *ao_loc, const int64_t *target_loc,
-                 const int *source_shell, const int64_t *coeff_offset,
-                 const uint8_t *edge_kind)
+void PARIhalf_transform(double *out, const double *mo_coeff,
+                        const double *coeff,
+                        int nmo, int naux, int nao_out, int nbas,
+                        const int *ao_loc, const int *out_ao_loc,
+                        const int64_t *target_loc,
+                        const int *source_shell,
+                        const int64_t *coeff_offset,
+                        const uint8_t *edge_kind)
 {
     const char TRANS_N = 'N';
     const char TRANS_T = 'T';
@@ -541,14 +458,14 @@ void PARIbuild_d(double *D, const double *mo_coeff, const double *coeff,
             max_shell = di;
         }
     }
-    memset(D, 0, sizeof(double) * (size_t)nocc*naux*nao);
+    memset(out, 0, sizeof(double) * (size_t)nmo*naux*nao_out);
 
 #pragma omp parallel
 {
     double *cbuf = malloc(
         sizeof(double) * (size_t)max_shell*max_shell*naux);
     double *dbuf = malloc(
-        sizeof(double) * (size_t)nocc*max_shell*naux);
+        sizeof(double) * (size_t)nmo*max_shell*naux);
 
 #pragma omp for schedule(dynamic, 1)
     for (int tsh = 0; tsh < nbas; tsh++) {
@@ -558,10 +475,10 @@ void PARIbuild_d(double *D, const double *mo_coeff, const double *coeff,
             continue;
         }
 
-        const int t0 = ao_loc[tsh];
-        const int dt = ao_loc[tsh+1] - t0;
+        const int t0 = out_ao_loc[tsh];
+        const int dt = ao_loc[tsh+1] - ao_loc[tsh];
         const int ndp = dt * naux;
-        memset(dbuf, 0, sizeof(double) * (size_t)nocc*ndp);
+        memset(dbuf, 0, sizeof(double) * (size_t)nmo*ndp);
 
         for (int64_t edge = edge0; edge < edge1; edge++) {
             const int ssh = source_shell[edge];
@@ -594,15 +511,15 @@ void PARIbuild_d(double *D, const double *mo_coeff, const double *coeff,
                 cp = cbuf;
             }
 
-            dgemm_(&TRANS_N, &TRANS_T, &ndp, &nocc, &ds,
-                   &D1, cp, &ndp, mo_coeff+(size_t)s0*nocc, &nocc,
+            dgemm_(&TRANS_N, &TRANS_T, &ndp, &nmo, &ds,
+                   &D1, cp, &ndp, mo_coeff+(size_t)s0*nmo, &nmo,
                    &D1, dbuf, &ndp);
         }
 
-        for (int i = 0; i < nocc; i++) {
+        for (int i = 0; i < nmo; i++) {
             for (int t = 0; t < dt; t++) {
                 for (int p = 0; p < naux; p++) {
-                    D[((size_t)i*naux+p)*nao+t0+t] =
+                    out[((size_t)i*naux+p)*nao_out+t0+t] =
                         dbuf[((size_t)i*dt+t)*naux+p];
                 }
             }
@@ -611,4 +528,31 @@ void PARIbuild_d(double *D, const double *mo_coeff, const double *coeff,
     free(cbuf);
     free(dbuf);
 }
+}
+
+
+/*
+ * Contract NBX-compressed D with dense H and scatter the active AO rows.
+ */
+void PARIbuild_l_nbx(double *L, double *buf, const double *D,
+                     const double *H, const int *ao_idx,
+                     int nocc, int naux, int nao, int nactive)
+{
+    const char TRANS_N = 'N';
+    const char TRANS_T = 'T';
+    const double D0 = 0;
+    const double D1 = 1;
+    const int ndp = nocc * naux;
+
+    dgemm_(&TRANS_N, &TRANS_T, &nao, &nactive, &ndp,
+           &D1, H, &nao, D, &nactive, &D0, buf, &nao);
+
+#pragma omp parallel for schedule(static)
+    for (int ia = 0; ia < nactive; ia++) {
+        double *Lrow = L + (size_t)ao_idx[ia]*nao;
+        const double *brow = buf + (size_t)ia*nao;
+        for (int nu = 0; nu < nao; nu++) {
+            Lrow[nu] += brow[nu];
+        }
+    }
 }

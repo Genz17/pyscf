@@ -238,6 +238,37 @@ class PARI_COEFF:
         return self.left(A, B), self.right(A, B)
 
 
+class NBX_LAYOUT:
+    '''Sparse auxiliary-function--AO-function pairs grouped by aux atom.'''
+
+    def __init__(self, df_coeff):
+        layout = df_coeff.aopair_layout
+        target_ao_loc = numpy.full(
+            (layout.natm, layout.nbas), -1, dtype=numpy.int32)
+        ao_idx = []
+        nao_by_aux_atom = numpy.empty(layout.natm, dtype=numpy.int32)
+
+        for A in range(layout.natm):
+            idx = []
+            nao = 0
+            target_loc = df_coeff.d_target_loc[A]
+            for ish in range(layout.nbas):
+                if target_loc[ish] == target_loc[ish+1]:
+                    continue
+                i0, i1 = layout.ao_loc[ish:ish+2]
+                target_ao_loc[A,ish] = nao
+                idx.extend(range(i0, i1))
+                nao += i1 - i0
+            ao_idx.append(numpy.asarray(idx, dtype=numpy.int32))
+            nao_by_aux_atom[A] = nao
+
+        self.target_ao_loc = target_ao_loc
+        self.ao_idx = ao_idx
+        self.nao_by_aux_atom = nao_by_aux_atom
+        self.npair = int(numpy.dot(
+            df_coeff.naux_by_atom, nao_by_aux_atom))
+
+
 def get_shlpr_mask(mol, tol=1e-12):
     from pyscf.scf import _vhf
     opt = _vhf._VHFOpt(mol, 'int2e', 'CVHFnrs8_prescreen',
@@ -427,86 +458,6 @@ def fill_aux_e2_sparse(mol, auxmol_or_auxbasis, aopair_layout, aux_atom,
     return mat
 
 
-def fill_g(mol, auxmol_or_auxbasis, aopair_layout, df_coeff, aux_atom,
-           j2c, intor='int3c2e', out=None, cintopt=None):
-    '''Build one metric-corrected ``G[AO1,aux,AO2]`` panel.'''
-    if not isinstance(aopair_layout, AOPAIR_LAYOUT):
-        raise TypeError('aopair_layout must be an AOPAIR_LAYOUT')
-    if (aopair_layout.natm != mol.natm or
-        aopair_layout.nbas != mol.nbas or
-        not numpy.array_equal(aopair_layout.ao_loc, mol.ao_loc_nr())):
-        raise ValueError('aopair_layout is incompatible with mol')
-    if df_coeff.aopair_layout is not aopair_layout:
-        raise ValueError('df_coeff and aopair_layout are inconsistent')
-    if numpy.any(aopair_layout.pair_kind != AOPAIR_LAYOUT.SPARSE):
-        raise NotImplementedError('dense atom-pair blocks are not implemented')
-
-    if isinstance(auxmol_or_auxbasis, gto.MoleBase):
-        auxmol = auxmol_or_auxbasis
-    else:
-        auxmol = df.addons.make_auxmol(mol, auxmol_or_auxbasis)
-    if auxmol.natm != mol.natm:
-        raise ValueError('inconsistent auxiliary and AO atoms')
-    if not 0 <= aux_atom < auxmol.natm:
-        raise IndexError('auxiliary atom index out of range')
-
-    if not mol.cart and auxmol.cart:
-        raise NotImplementedError('Interface for int3c2e_ssc')
-    elif mol.cart and not auxmol.cart:
-        raise RuntimeError('Cartesian orbitals for mol and spherical orbitals '
-                           'for auxmol not supported')
-
-    auxslice = auxmol.aoslice_by_atom()
-    k0, k1 = auxslice[aux_atom,:2] + mol.nbas
-    shls_slice = (0, mol.nbas, 0, mol.nbas, k0, k1)
-
-    intor = mol._add_suffix(intor)
-    intor, comp = moleintor._get_intor_and_comp(intor, None)
-    if comp != 1:
-        raise NotImplementedError('fill_g only supports one component')
-    if 'spinor' in intor:
-        raise NotImplementedError('spinor integrals are not supported')
-
-    atm, bas, env = gto.mole.conc_env(
-        mol._atm, mol._bas, mol._env,
-        auxmol._atm, auxmol._bas, auxmol._env)
-    ao_loc = moleintor.make_loc(bas, intor)
-    nao = mol.nao_nr()
-    naux = ao_loc[k1] - ao_loc[k0]
-    mat = numpy.ndarray((nao,naux,nao), numpy.double, out, order='C')
-
-    j2c = numpy.asarray(j2c, dtype=numpy.double, order='C')
-    if (j2c.ndim != 2 or j2c.shape[0] != df_coeff.aux_loc[-1] or
-        j2c.shape[1] != naux):
-        raise ValueError('j2c panel has incompatible shape')
-
-    if mat.size > 0:
-        if cintopt is None:
-            cintopt = moleintor.make_cintopt(
-                atm, bas[:mol.nbas], env, intor)
-
-        libpari.PARIfill_g(
-            getattr(moleintor.libcgto, intor),
-            mat.ctypes.data_as(ctypes.c_void_p),
-            df_coeff._data.ctypes.data_as(ctypes.c_void_p),
-            j2c.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(nao), ctypes.c_int(naux),
-            ctypes.c_int(aopair_layout.npair),
-            aopair_layout.pair_atoms.ctypes.data_as(ctypes.c_void_p),
-            aopair_layout.pair_aopair_loc.ctypes.data_as(ctypes.c_void_p),
-            aopair_layout.shlpr_loc.ctypes.data_as(ctypes.c_void_p),
-            aopair_layout.shlpr.ctypes.data_as(ctypes.c_void_p),
-            aopair_layout.aopair_loc.ctypes.data_as(ctypes.c_void_p),
-            ao_loc.ctypes.data_as(ctypes.c_void_p),
-            df_coeff._offsets.ctypes.data_as(ctypes.c_void_p),
-            df_coeff.aux_loc.ctypes.data_as(ctypes.c_void_p),
-            (ctypes.c_int*6)(*shls_slice), cintopt,
-            atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(atm)),
-            bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(len(bas)),
-            env.ctypes.data_as(ctypes.c_void_p))
-    return mat
-
-
 def fill_j2c(auxmol, aux_atom, out=None):
     '''Two-center metric panel ``(all auxiliary AOs|auxiliary AOs on A)``.'''
     if not 0 <= aux_atom < auxmol.natm:
@@ -519,54 +470,8 @@ def fill_j2c(auxmol, aux_atom, out=None):
     return mat.T
 
 
-def unpack_aopair(packed, aopair_layout, out=None):
-    '''Unpack sparse AO pairs to ``(AO1,aux,AO2)`` C-order.'''
-    packed = numpy.asarray(packed)
-    if packed.shape[0] != aopair_layout.naopair:
-        raise ValueError('packed AO-pair array has incompatible shape')
-    if packed.dtype != numpy.double or not packed.flags.c_contiguous:
-        packed = numpy.asarray(packed, dtype=numpy.double, order='C')
-
-    nao = aopair_layout.ao_loc[-1]
-    naux = packed.shape[1]
-    mat = numpy.ndarray((nao,naux,nao), numpy.double, out, order='C')
-    libpari.PARIunpack(
-        mat.ctypes.data_as(ctypes.c_void_p),
-        packed.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nao), ctypes.c_int(naux),
-        ctypes.c_int(aopair_layout.nshlpr),
-        aopair_layout.shlpr.ctypes.data_as(ctypes.c_void_p),
-        aopair_layout.aopair_loc.ctypes.data_as(ctypes.c_void_p),
-        aopair_layout.ao_loc.ctypes.data_as(ctypes.c_void_p))
-    return mat
-
-
-def metric_contract(j3c, df_coeff, j2c):
-    '''Apply the PARI metric correction to packed three-center integrals.'''
-    layout = df_coeff.aopair_layout
-    j3c = numpy.asarray(j3c)
-    if (j3c.ndim != 2 or j3c.shape[0] != layout.naopair or
-        j3c.dtype != numpy.double or not j3c.flags.c_contiguous):
-        raise ValueError('j3c must be a C-contiguous double array')
-    j2c = numpy.asarray(j2c, dtype=numpy.double, order='C')
-    if (j2c.ndim != 2 or j2c.shape[0] != df_coeff.aux_loc[-1] or
-        j2c.shape[1] != j3c.shape[1]):
-        raise ValueError('j2c panel has incompatible shape')
-
-    libpari.PARImetric_contract(
-        j3c.ctypes.data_as(ctypes.c_void_p),
-        df_coeff._data.ctypes.data_as(ctypes.c_void_p),
-        j2c.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(j3c.shape[1]), ctypes.c_int(layout.npair),
-        layout.pair_atoms.ctypes.data_as(ctypes.c_void_p),
-        layout.pair_aopair_loc.ctypes.data_as(ctypes.c_void_p),
-        df_coeff._offsets.ctypes.data_as(ctypes.c_void_p),
-        df_coeff.aux_loc.ctypes.data_as(ctypes.c_void_p))
-    return j3c
-
-
-def build_d(mo_coeff, df_coeff, aux_atom, out=None):
-    '''Build dense ``D[occ,aux,AO]`` from sparse PARI coefficients.'''
+def _half_transform(mo_coeff, df_coeff, aux_atom,
+                    out_ao_loc, nao_out, out=None):
     layout = df_coeff.aopair_layout
     if not 0 <= aux_atom < layout.natm:
         raise IndexError('auxiliary atom index out of range')
@@ -575,17 +480,17 @@ def build_d(mo_coeff, df_coeff, aux_atom, out=None):
     if mo_coeff.ndim != 2 or mo_coeff.shape[0] != layout.ao_loc[-1]:
         raise ValueError('mo_coeff has incompatible shape')
 
-    nocc = mo_coeff.shape[1]
+    nmo = mo_coeff.shape[1]
     naux = df_coeff.naux_by_atom[aux_atom]
-    nao = layout.ao_loc[-1]
-    mat = numpy.ndarray((nocc,naux,nao), numpy.double, out, order='C')
-    libpari.PARIbuild_d(
+    mat = numpy.ndarray((nmo,naux,nao_out), numpy.double, out, order='C')
+    libpari.PARIhalf_transform(
         mat.ctypes.data_as(ctypes.c_void_p),
         mo_coeff.ctypes.data_as(ctypes.c_void_p),
         df_coeff._data.ctypes.data_as(ctypes.c_void_p),
-        ctypes.c_int(nocc), ctypes.c_int(naux), ctypes.c_int(nao),
+        ctypes.c_int(nmo), ctypes.c_int(naux), ctypes.c_int(nao_out),
         ctypes.c_int(layout.nbas),
         layout.ao_loc.ctypes.data_as(ctypes.c_void_p),
+        out_ao_loc.ctypes.data_as(ctypes.c_void_p),
         df_coeff.d_target_loc[aux_atom].ctypes.data_as(ctypes.c_void_p),
         df_coeff.d_source_shell.ctypes.data_as(ctypes.c_void_p),
         df_coeff.d_coeff_offset.ctypes.data_as(ctypes.c_void_p),
@@ -598,7 +503,7 @@ class PARI(lib.StreamObject):
 
     _keys = {
         'mol', 'auxmol', 'schwarz_tol', 'shlpr_mask',
-        'aopair_layout', 'j2c', 'df_coeff',
+        'aopair_layout', 'nbx_layout', 'df_coeff',
     }
 
     def __init__(self, mol, auxbasis=None, schwarz_tol=1e-12):
@@ -612,7 +517,7 @@ class PARI(lib.StreamObject):
         self.auxmol = None
         self.shlpr_mask = None
         self.aopair_layout = None
-        self.j2c = None
+        self.nbx_layout = None
         self.df_coeff = None
 
         self._j_df = df.DF(mol, auxbasis)
@@ -657,7 +562,12 @@ class PARI(lib.StreamObject):
                  layout.naopair, naopair, layout.naopair/naopair*100)
 
         naux_by_atom = auxslice[:,3] - auxslice[:,2]
+        naux = auxslice[-1,3]
         nao_by_atom = aoslice[:,3] - aoslice[:,2]
+        nbx_dense = naux * nao
+        log.info('PARI NBX auxiliary-AO pairs = %d / %d (%.1f%%)',
+                 self.nbx_layout.npair, nbx_dense,
+                 self.nbx_layout.npair/nbx_dense*100)
         dense_size = 0
         for A in range(mol.natm):
             dense_size += (nao_by_atom[A] * (nao_by_atom[A]+1) // 2 *
@@ -675,10 +585,16 @@ class PARI(lib.StreamObject):
 
         nocc = mol.nelectron // 2
         max_naux = naux_by_atom.max(initial=0)
-        buf_mem = max_naux * (
+        max_nactive = self.nbx_layout.nao_by_aux_atom.max(initial=0)
+        d_buf_mem = numpy.max(
+            nocc * naux_by_atom *
+            self.nbx_layout.nao_by_aux_atom, initial=0) * itemsize
+        h_buf_mem = nocc * max_naux * nao * itemsize
+        g_buf_mem = max_naux * nao**2 * itemsize
+        l_buf_mem = max_nactive * nao * itemsize
+        buf_mem = d_buf_mem + h_buf_mem + g_buf_mem + l_buf_mem
+        dense_buf_mem = max_naux * (
             2*nocc*nao + nao**2) * itemsize
-        packed_mem = max_naux * layout.naopair * itemsize
-        naux = auxslice[-1,3]
         metric_mem = naux**2 * itemsize
         metric_panel_mem = naux * max_naux * itemsize
         max_shell = numpy.diff(layout.ao_loc).max(initial=0)
@@ -694,15 +610,15 @@ class PARI(lib.StreamObject):
         log.info('Estimated PARI K peak memory = %.2f MB (nocc = %d)',
                  peak_mem/1e6, nocc)
         log.info('  coefficients %.2f MB, j2c panel %.2f MB, '
-                 'D/H/dense-G buffers %.2f MB, '
+                 'NBX-D/H/dense-G/L-row buffers %.2f MB, '
                  'L/K matrices %.2f MB',
                  coeff_mem/1e6, metric_panel_mem/1e6, buf_mem/1e6,
                  matrix_mem/1e6)
         log.info('  C-kernel thread buffers %.2f MB (%d threads)',
                  thread_mem/1e6, lib.num_threads())
         log.info('  excluding the DF-J cache and caller-owned dm/mo_coeff')
-        log.info('  version1 packed-G buffer requires another %.2f MB',
-                 packed_mem/1e6)
+        log.info('  dense D/H/G buffers require %.2f MB',
+                 dense_buf_mem/1e6)
         log.info('  full fitting j2c requires %.2f MB and is not retained',
                  metric_mem/1e6)
         return self
@@ -739,26 +655,27 @@ class PARI(lib.StreamObject):
             self.mol, self.auxmol, self.aopair_layout, aux_atom,
             atom_pair=atom_pair, **kwargs)
 
-    def fill_g(self, aux_atom, j2c, **kwargs):
-        self._build_auxmol()
-        self._build_aopair_layout()
-        return fill_g(
-            self.mol, self.auxmol, self.aopair_layout, self.df_coeff,
-            aux_atom, j2c, **kwargs)
-
     def fill_j2c(self, aux_atom, out=None):
         self._build_auxmol()
         return fill_j2c(self.auxmol, aux_atom, out)
 
-    def unpack_aopair(self, packed, out=None):
-        self._build_aopair_layout()
-        return unpack_aopair(packed, self.aopair_layout, out)
+    def half_transform(self, mo_coeff, aux_atom, compact=True, out=None):
+        '''Half-transform PARI coefficients for one auxiliary atom.
 
-    def metric_contract(self, j3c, j2c):
-        return metric_contract(j3c, self.df_coeff, j2c)
-
-    def build_d(self, mo_coeff, aux_atom, out=None):
-        return build_d(mo_coeff, self.df_coeff, aux_atom, out)
+        The compact output contains only the NBX-active AO functions.
+        '''
+        if self.df_coeff is None:
+            self.build()
+        if not 0 <= aux_atom < self.mol.natm:
+            raise IndexError('auxiliary atom index out of range')
+        if compact:
+            nao = int(self.nbx_layout.nao_by_aux_atom[aux_atom])
+            out_ao_loc = self.nbx_layout.target_ao_loc[aux_atom]
+        else:
+            nao = self.aopair_layout.ao_loc[-1]
+            out_ao_loc = self.aopair_layout.ao_loc
+        return _half_transform(
+            mo_coeff, self.df_coeff, aux_atom, out_ao_loc, nao, out)
 
     def fitting(self):
         t0 = (logger.process_clock(), logger.perf_counter())
@@ -814,7 +731,7 @@ class PARI(lib.StreamObject):
             tspans[3] += tock - tick
 
         self.df_coeff = df_coeff
-        self.j2c = None
+        self.nbx_layout = NBX_LAYOUT(df_coeff)
         self.dump_sparsity()
         tnames = ('setup', 'j2c', 'j3c', 'solve')
         for name, tspan in zip(tnames, tspans):
@@ -841,7 +758,7 @@ class PARI(lib.StreamObject):
         self.auxmol = None
         self.shlpr_mask = None
         self.aopair_layout = None
-        self.j2c = None
+        self.nbx_layout = None
         self.df_coeff = None
         self._j_df.reset(self.mol)
         self._j_df.auxbasis = self.auxbasis
