@@ -140,3 +140,155 @@ void fill_aux_e2(CINTIntegralFunction *intor, double *out, int comp,
     free(cache);
 }
 }
+
+
+static size_t _max_shell_size(int shlpr0, int shlpr1,
+                              const int *shlpr, int ksh0, int ksh1,
+                              int *ao_loc)
+{
+    int ijsh, ish, jsh, ksh;
+    size_t dij;
+    size_t max_dij = 0;
+    size_t max_dk = 0;
+
+    for (ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
+        ish = shlpr[ijsh*2  ];
+        jsh = shlpr[ijsh*2+1];
+        dij = ((size_t)ao_loc[ish+1] - ao_loc[ish]) *
+              (ao_loc[jsh+1] - ao_loc[jsh]);
+        if (dij > max_dij) {
+            max_dij = dij;
+        }
+    }
+    for (ksh = ksh0; ksh < ksh1; ksh++) {
+        if (ao_loc[ksh+1] - ao_loc[ksh] > max_dk) {
+            max_dk = ao_loc[ksh+1] - ao_loc[ksh];
+        }
+    }
+    return max_dij * max_dk;
+}
+
+
+static void _copy_ints_sparse(double *out, const double *buf, int comp,
+                              int64_t row0, int p0, int di, int dj, int dk,
+                              int naux, int64_t nrow, int diagonal)
+{
+    int ic, i, j, k;
+    int64_t row;
+    const size_t dij = (size_t)di * dj;
+    const size_t dijk = dij * dk;
+    const size_t nrowaux = (size_t)nrow * naux;
+    double *pout;
+    const double *pbuf;
+
+    for (ic = 0; ic < comp; ic++) {
+        pout = out + (size_t)ic*nrowaux;
+        pbuf = buf + (size_t)ic*dijk;
+        row = row0;
+        if (diagonal) {
+            for (i = 0; i < di; i++) {
+                for (j = i; j < dj; j++, row++) {
+                    for (k = 0; k < dk; k++) {
+                        pout[(size_t)row*naux+p0+k] =
+                            pbuf[i + (size_t)di*(j + (size_t)dj*k)];
+                    }
+                }
+            }
+        } else {
+            for (i = 0; i < di; i++) {
+                for (j = 0; j < dj; j++, row++) {
+                    for (k = 0; k < dk; k++) {
+                        pout[(size_t)row*naux+p0+k] =
+                            pbuf[i + (size_t)di*(j + (size_t)dj*k)];
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+static void _zero_ints_sparse(double *out, int comp,
+                              int64_t row0, int64_t row1,
+                              int p0, int dk, int naux, int64_t nrow)
+{
+    int ic;
+    int64_t row;
+    const size_t nrowaux = (size_t)nrow * naux;
+    double *pout;
+
+    for (ic = 0; ic < comp; ic++) {
+        pout = out + (size_t)ic*nrowaux;
+        for (row = row0; row < row1; row++) {
+            memset(pout + (size_t)row*naux+p0, 0, sizeof(double)*dk);
+        }
+    }
+}
+
+
+/*
+ * Evaluate selected AO shell pairs and pack them as
+ * out[comp,naopair,naux] in C-order. For diagonal AO shells, only
+ * i <= j is stored.
+ */
+void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
+                        int shlpr0, int shlpr1, const int *shlpr,
+                        const int64_t *aopair_loc, int *shls_slice,
+                        int *ao_loc, CINTOpt *cintopt,
+                        int *atm, int natm, int *bas, int nbas, double *env)
+{
+    const int ksh0 = shls_slice[4];
+    const int ksh1 = shls_slice[5];
+    const int naux = ao_loc[ksh1] - ao_loc[ksh0];
+    const int64_t aopair0 = aopair_loc[shlpr0];
+    const int64_t nrow = aopair_loc[shlpr1] - aopair0;
+    const size_t cache_size = _max_cache_size(
+        intor, shls_slice, atm, natm, bas, nbas, env);
+    const size_t buf_size = _max_shell_size(
+        shlpr0, shlpr1, shlpr, ksh0, ksh1, ao_loc) * comp;
+
+#pragma omp parallel
+{
+    int ijsh, ish, jsh, ksh;
+    int di, dj, dk, p0;
+    int has_value;
+    int dims[3];
+    int shls[3];
+    int64_t row0, row1;
+    double *buf = malloc(sizeof(double) * buf_size);
+    double *cache = malloc(sizeof(double) * cache_size);
+
+#pragma omp for schedule(dynamic, 4)
+    for (ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
+        ish = shlpr[ijsh*2  ];
+        jsh = shlpr[ijsh*2+1];
+        di = ao_loc[ish+1] - ao_loc[ish];
+        dj = ao_loc[jsh+1] - ao_loc[jsh];
+        row0 = aopair_loc[ijsh  ] - aopair0;
+        row1 = aopair_loc[ijsh+1] - aopair0;
+
+        shls[0] = ish;
+        shls[1] = jsh;
+        dims[0] = di;
+        dims[1] = dj;
+
+        for (ksh = ksh0; ksh < ksh1; ksh++) {
+            dk = ao_loc[ksh+1] - ao_loc[ksh];
+            p0 = ao_loc[ksh] - ao_loc[ksh0];
+            shls[2] = ksh;
+            dims[2] = dk;
+            has_value = (*intor)(buf, dims, shls, atm, natm,
+                                 bas, nbas, env, cintopt, cache);
+            if (has_value) {
+                _copy_ints_sparse(out, buf, comp, row0, p0, di, dj, dk,
+                                  naux, nrow, ish == jsh);
+            } else {
+                _zero_ints_sparse(out, comp, row0, row1,
+                                  p0, dk, naux, nrow);
+            }
+        }
+    }
+    free(buf);
+    free(cache);
+}
+}
