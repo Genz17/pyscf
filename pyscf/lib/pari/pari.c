@@ -335,10 +335,12 @@ static void _scatter_pair(double *G, const double *packed,
 
 
 /*
- * Evaluate, metric-correct, and scatter each canonical AO atom pair.
- * The output is G[AO1,aux,AO2] in C-order.
+ * Evaluate and metric-correct each canonical AO atom pair. If sparse is
+ * false, scatter the result to G[AO1,aux,AO2] in C-order. Otherwise,
+ * retain the packed G[naopair,aux] layout.
  */
 void PARIfill_g(CINTIntegralFunction *intor, double *G,
+                int sparse,
                 const double *coeff, const double *j2c,
                 int nao, int naux, int npair, const int *pair_atoms,
                 const int64_t *pair_aopair_loc, const int64_t *shlpr_loc,
@@ -365,11 +367,19 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
             max_nrow = nrow;
         }
     }
-    memset(G, 0, sizeof(double) * (size_t)nao*naux*nao);
+    if (sparse) {
+        memset(G, 0, sizeof(double) *
+               (size_t)pair_aopair_loc[npair]*naux);
+    } else {
+        memset(G, 0, sizeof(double) * (size_t)nao*naux*nao);
+    }
 
 #pragma omp parallel
 {
-    double *gpair = malloc(sizeof(double) * (size_t)max_nrow*naux);
+    double *gbuf = NULL;
+    if (!sparse) {
+        gbuf = malloc(sizeof(double) * (size_t)max_nrow*naux);
+    }
     double *intbuf = malloc(sizeof(double) * intbuf_size);
     double *cache = malloc(sizeof(double) * cache_size);
 
@@ -381,6 +391,7 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
         const int nrow = pair_aopair_loc[pair+1] - aopair0;
         const int64_t shlpr0 = shlpr_loc[pair];
         const int64_t shlpr1 = shlpr_loc[pair+1];
+        double *gpair = sparse ? G + (size_t)aopair0*naux : gbuf;
         memset(gpair, 0, sizeof(double) * (size_t)nrow*naux);
 
         for (int64_t ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
@@ -424,10 +435,12 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
                    &D1, gpair, &naux);
         }
 
-        _scatter_pair(G, gpair, nao, naux, shlpr0, shlpr1,
-                      shlpr, aopair_loc, aopair0, ao_loc);
+        if (!sparse) {
+            _scatter_pair(G, gpair, nao, naux, shlpr0, shlpr1,
+                          shlpr, aopair_loc, aopair0, ao_loc);
+        }
     }
-    free(gpair);
+    free(gbuf);
     free(intbuf);
     free(cache);
 }
@@ -435,37 +448,48 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
 
 
 /*
- * Half-transform sparse fitting coefficients. Directed shell-pair jobs
- * are grouped by their target AO shell.
+ * Half-transform sparse AO-pair data. Directed shell-pair jobs are
+ * grouped by their target AO shell.
  */
 void PARIhalf_transform(double *out, const double *mo_coeff,
-                        const double *coeff,
+                        const double *data,
                         int nmo, int naux, int nao_out, int nbas,
                         const int *ao_loc, const int *out_ao_loc,
                         const int64_t *target_loc,
                         const int *source_shell,
-                        const int64_t *coeff_offset,
-                        const uint8_t *edge_kind)
+                        const int64_t *data_offset,
+                        const uint8_t *edge_kind, int offset_scale)
 {
     const char TRANS_N = 'N';
     const char TRANS_T = 'T';
     const double D1 = 1;
     int max_shell = 0;
+    int max_source = 0;
 
     for (int ish = 0; ish < nbas; ish++) {
         const int di = ao_loc[ish+1] - ao_loc[ish];
         if (di > max_shell) {
             max_shell = di;
         }
+        int nsource = 0;
+        for (int64_t edge = target_loc[ish];
+             edge < target_loc[ish+1]; edge++) {
+            const int ssh = source_shell[edge];
+            nsource += ao_loc[ssh+1] - ao_loc[ssh];
+        }
+        if (nsource > max_source) {
+            max_source = nsource;
+        }
     }
     memset(out, 0, sizeof(double) * (size_t)nmo*naux*nao_out);
 
 #pragma omp parallel
 {
-    double *cbuf = malloc(
-        sizeof(double) * (size_t)max_shell*max_shell*naux);
+    const size_t cbuf_size = (size_t)max_source*max_shell*naux;
+    double *cbuf = malloc(sizeof(double) * cbuf_size);
     double *dbuf = malloc(
         sizeof(double) * (size_t)nmo*max_shell*naux);
+    double *mobuf = malloc(sizeof(double) * (size_t)max_source*nmo);
 
 #pragma omp for schedule(dynamic, 1)
     for (int tsh = 0; tsh < nbas; tsh++) {
@@ -480,41 +504,45 @@ void PARIhalf_transform(double *out, const double *mo_coeff,
         const int ndp = dt * naux;
         memset(dbuf, 0, sizeof(double) * (size_t)nmo*ndp);
 
+        int nsource = 0;
         for (int64_t edge = edge0; edge < edge1; edge++) {
             const int ssh = source_shell[edge];
             const int s0 = ao_loc[ssh];
             const int ds = ao_loc[ssh+1] - s0;
-            const double *c0 = coeff + coeff_offset[edge];
-            const double *cp = c0;
+            const double *c0 = data + data_offset[edge]*offset_scale;
+            double *cp = cbuf + (size_t)nsource*ndp;
 
-            if (edge_kind[edge] == 1) {
+            if (edge_kind[edge] == 0) {
+                memcpy(cp, c0, sizeof(double) * (size_t)ds*ndp);
+            } else if (edge_kind[edge] == 1) {
                 for (int s = 0; s < ds; s++) {
                     for (int t = 0; t < dt; t++) {
                         for (int p = 0; p < naux; p++) {
-                            cbuf[((size_t)s*dt+t)*naux+p] =
+                            cp[((size_t)s*dt+t)*naux+p] =
                                 c0[((size_t)t*ds+s)*naux+p];
                         }
                     }
                 }
-                cp = cbuf;
-            } else if (edge_kind[edge] == 2) {
+            } else {
                 int64_t row = 0;
                 for (int s = 0; s < ds; s++) {
                     for (int t = s; t < dt; t++, row++) {
                         for (int p = 0; p < naux; p++) {
                             const double v = c0[(size_t)row*naux+p];
-                            cbuf[((size_t)s*dt+t)*naux+p] = v;
-                            cbuf[((size_t)t*dt+s)*naux+p] = v;
+                            cp[((size_t)s*dt+t)*naux+p] = v;
+                            cp[((size_t)t*dt+s)*naux+p] = v;
                         }
                     }
                 }
-                cp = cbuf;
             }
-
-            dgemm_(&TRANS_N, &TRANS_T, &ndp, &nmo, &ds,
-                   &D1, cp, &ndp, mo_coeff+(size_t)s0*nmo, &nmo,
-                   &D1, dbuf, &ndp);
+            memcpy(mobuf + (size_t)nsource*nmo,
+                   mo_coeff + (size_t)s0*nmo,
+                   sizeof(double) * (size_t)ds*nmo);
+            nsource += ds;
         }
+        dgemm_(&TRANS_N, &TRANS_T, &ndp, &nmo, &nsource,
+               &D1, cbuf, &ndp, mobuf, &nmo,
+               &D1, dbuf, &ndp);
 
         for (int i = 0; i < nmo; i++) {
             for (int t = 0; t < dt; t++) {
@@ -527,6 +555,7 @@ void PARIhalf_transform(double *out, const double *mo_coeff,
     }
     free(cbuf);
     free(dbuf);
+    free(mobuf);
 }
 }
 

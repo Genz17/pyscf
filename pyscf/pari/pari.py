@@ -117,6 +117,41 @@ class AOPAIR_LAYOUT:
         self.npair = len(self.pair_atoms)
         self.nshlpr = len(self.shlpr)
         self.naopair = int(self.aopair_loc[-1])
+        self._build_target_layout()
+
+    def _build_target_layout(self):
+        target_count = numpy.zeros(self.nbas, dtype=numpy.int64)
+        for ish, jsh in self.shlpr:
+            if ish == jsh:
+                target_count[ish] += 1
+            else:
+                target_count[ish] += 1
+                target_count[jsh] += 1
+
+        self.target_loc = numpy.empty(self.nbas+1, dtype=numpy.int64)
+        self.target_loc[0] = 0
+        numpy.cumsum(target_count, out=self.target_loc[1:])
+        self.source_shell = numpy.empty(
+            self.target_loc[-1], dtype=numpy.int32)
+        self.aopair_offset = numpy.empty(
+            self.target_loc[-1], dtype=numpy.int64)
+        self.edge_kind = numpy.empty(
+            self.target_loc[-1], dtype=numpy.uint8)
+
+        target_next = self.target_loc[:-1].copy()
+        for ijsh, (ish, jsh) in enumerate(self.shlpr):
+            row0 = self.aopair_loc[ijsh]
+            edge = target_next[jsh]
+            self.source_shell[edge] = ish
+            self.aopair_offset[edge] = row0
+            self.edge_kind[edge] = 2 if ish == jsh else 0
+            target_next[jsh] += 1
+            if ish != jsh:
+                edge = target_next[ish]
+                self.source_shell[edge] = jsh
+                self.aopair_offset[edge] = row0
+                self.edge_kind[edge] = 1
+                target_next[ish] += 1
 
     def get_pair_id(self, A, B):
         if not (0 <= A < self.natm and 0 <= B < self.natm):
@@ -472,31 +507,30 @@ def fill_j2c(auxmol, aux_atom, out=None):
     return mat.T
 
 
-def _half_transform(mo_coeff, df_coeff, aux_atom,
-                    out_ao_loc, nao_out, out=None):
-    layout = df_coeff.aopair_layout
-    if not 0 <= aux_atom < layout.natm:
-        raise IndexError('auxiliary atom index out of range')
+def _half_transform(mo_coeff, data, naux, layout, out_ao_loc, nao_out,
+                    target_loc, source_shell, data_offset, edge_kind,
+                    offset_scale=1, out=None):
     mo_coeff = numpy.asarray(
         mo_coeff, dtype=numpy.double, order='C')
     if mo_coeff.ndim != 2 or mo_coeff.shape[0] != layout.ao_loc[-1]:
         raise ValueError('mo_coeff has incompatible shape')
+    data = numpy.asarray(data, dtype=numpy.double, order='C')
 
     nmo = mo_coeff.shape[1]
-    naux = df_coeff.naux_by_atom[aux_atom]
     mat = numpy.ndarray((nmo,naux,nao_out), numpy.double, out, order='C')
     libpari.PARIhalf_transform(
         mat.ctypes.data_as(ctypes.c_void_p),
         mo_coeff.ctypes.data_as(ctypes.c_void_p),
-        df_coeff._data.ctypes.data_as(ctypes.c_void_p),
+        data.ctypes.data_as(ctypes.c_void_p),
         ctypes.c_int(nmo), ctypes.c_int(naux), ctypes.c_int(nao_out),
         ctypes.c_int(layout.nbas),
         layout.ao_loc.ctypes.data_as(ctypes.c_void_p),
         out_ao_loc.ctypes.data_as(ctypes.c_void_p),
-        df_coeff.d_target_loc[aux_atom].ctypes.data_as(ctypes.c_void_p),
-        df_coeff.d_source_shell.ctypes.data_as(ctypes.c_void_p),
-        df_coeff.d_coeff_offset.ctypes.data_as(ctypes.c_void_p),
-        df_coeff.d_edge_kind.ctypes.data_as(ctypes.c_void_p))
+        target_loc.ctypes.data_as(ctypes.c_void_p),
+        source_shell.ctypes.data_as(ctypes.c_void_p),
+        data_offset.ctypes.data_as(ctypes.c_void_p),
+        edge_kind.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(offset_scale))
     return mat
 
 
@@ -592,7 +626,7 @@ class PARI(lib.StreamObject):
             nocc * naux_by_atom *
             self.nbx_layout.nao_by_aux_atom, initial=0) * itemsize
         h_buf_mem = nocc * max_naux * nao * itemsize
-        g_buf_mem = max_naux * nao**2 * itemsize
+        g_buf_mem = max_naux * layout.naopair * itemsize
         l_buf_mem = max_nactive * nao * itemsize
         buf_mem = d_buf_mem + h_buf_mem + g_buf_mem + l_buf_mem
         dense_buf_mem = max_naux * (
@@ -602,17 +636,24 @@ class PARI(lib.StreamObject):
         max_shell = numpy.diff(layout.ao_loc).max(initial=0)
         d_thread_mem = (lib.num_threads() * max_shell * max_naux *
                         (nocc + max_shell) * itemsize)
-        max_pair = layout.naopair_by_pair.max(initial=0)
-        e_thread_mem = (lib.num_threads() * max_pair *
-                        max_naux * itemsize)
-        thread_mem = max(d_thread_mem, e_thread_mem)
+        max_source = 0
+        for tsh in range(layout.nbas):
+            edge0, edge1 = layout.target_loc[tsh:tsh+2]
+            source = layout.source_shell[edge0:edge1]
+            nsource = numpy.sum(
+                layout.ao_loc[source+1] - layout.ao_loc[source])
+            max_source = max(max_source, nsource)
+        h_thread_mem = lib.num_threads() * (
+            max_source * (max_shell*max_naux + nocc) +
+            nocc*max_shell*max_naux) * itemsize
+        thread_mem = max(d_thread_mem, h_thread_mem)
         matrix_mem = 2 * nao**2 * itemsize
         peak_mem = (coeff_mem + metric_panel_mem + buf_mem +
                     thread_mem + matrix_mem)
         log.info('Estimated PARI K peak memory = %.2f MB (nocc = %d)',
                  peak_mem/1e6, nocc)
         log.info('  coefficients %.2f MB, j2c panel %.2f MB, '
-                 'NBX-D/H/dense-G/L-row buffers %.2f MB, '
+                 'NBX-D/H/sparse-G/L-row buffers %.2f MB, '
                  'L/K matrices %.2f MB',
                  coeff_mem/1e6, metric_panel_mem/1e6, buf_mem/1e6,
                  matrix_mem/1e6)
@@ -682,7 +723,13 @@ class PARI(lib.StreamObject):
             nao = self.aopair_layout.ao_loc[-1]
             out_ao_loc = self.aopair_layout.ao_loc
         return _half_transform(
-            mo_coeff, self.df_coeff, aux_atom, out_ao_loc, nao, out)
+            mo_coeff, self.df_coeff._data,
+            self.df_coeff.naux_by_atom[aux_atom],
+            self.aopair_layout, out_ao_loc, nao,
+            self.df_coeff.d_target_loc[aux_atom],
+            self.df_coeff.d_source_shell,
+            self.df_coeff.d_coeff_offset,
+            self.df_coeff.d_edge_kind, out=out)
 
     def fitting(self):
         t0 = (logger.process_clock(), logger.perf_counter())
