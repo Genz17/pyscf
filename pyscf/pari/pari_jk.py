@@ -108,7 +108,7 @@ class _PARIHF:
 
 
 def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
-            sparse=False, out=None, cintopt=None):
+            out=None, cintopt=None):
     '''Build one metric-corrected G panel.'''
     mol = mypari.mol
     auxmol = mypari.auxmol
@@ -140,14 +140,9 @@ def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
         mol._atm, mol._bas, mol._env,
         auxmol._atm, auxmol._bas, auxmol._env)
     ao_loc = moleintor.make_loc(bas, intor)
-    nao = mol.nao_nr()
     naux = ao_loc[k1] - ao_loc[k0]
-    if sparse:
-        mat = numpy.ndarray(
-            (layout.naopair,naux), numpy.double, out, order='C')
-    else:
-        mat = numpy.ndarray(
-            (nao,naux,nao), numpy.double, out, order='C')
+    mat = numpy.ndarray(
+        (layout.naopair,naux), numpy.double, out, order='C')
 
     j2c = numpy.asarray(j2c, dtype=numpy.double, order='C')
     if (j2c.ndim != 2 or j2c.shape[0] != df_coeff.aux_loc[-1] or
@@ -162,10 +157,9 @@ def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
         pari_module.libpari.PARIfill_g(
             getattr(moleintor.libcgto, intor),
             mat.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(sparse),
             df_coeff._data.ctypes.data_as(ctypes.c_void_p),
             j2c.ctypes.data_as(ctypes.c_void_p),
-            ctypes.c_int(nao), ctypes.c_int(naux),
+            ctypes.c_int(naux),
             ctypes.c_int(layout.npair),
             layout.pair_atoms.ctypes.data_as(ctypes.c_void_p),
             layout.pair_aopair_loc.ctypes.data_as(ctypes.c_void_p),
@@ -301,8 +295,7 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
 
         tick = tock
         out = Gbuf[:layout.naopair*naux_A]
-        Gmat = _fill_g(
-            mypari, A, j2c, sparse=True, out=out)
+        Gmat = _fill_g(mypari, A, j2c, out=out)
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
         tspans[2] += tock - tick
@@ -342,235 +335,6 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
               mol.natm*layout.npair, mol.natm*pair_factor.sum(),
               mol.natm*numpy.count_nonzero(numpy.diff(layout.target_loc)),
               mol.natm)
-    log.timer('PARI K', *t0)
-    return vk
-
-
-def get_k_dense_g(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None,
-                  omega=None, s1e=None):
-    # This reference scatters G to a dense AO1-by-AO2 panel before the
-    # H half-transform.
-    # NBX compresses the auxiliary-AO pair in D. H remains dense, and the
-    # final contraction is evaluated only for active AO rows.
-    if omega is not None:
-        raise NotImplementedError('range-separated exchange is not supported')
-    if hermi != 1:
-        raise NotImplementedError('PARI K only supports hermi=1')
-
-    dm_tag = dm
-    dm = numpy.asarray(dm)
-    nao = mypari.mol.nao_nr()
-    if dm.shape != (nao, nao):
-        raise NotImplementedError('PARI K only supports one density matrix')
-    if numpy.iscomplexobj(dm):
-        raise NotImplementedError('complex density matrices are not supported')
-
-    if mo_coeff is None:
-        mo_coeff = getattr(dm_tag, 'mo_coeff', None)
-        if mo_occ is None:
-            mo_occ = getattr(dm_tag, 'mo_occ', None)
-    if s1e is None and (mo_coeff is None or mo_occ is None):
-        s1e = mypari.mol.intor_symmetric('int1e_ovlp')
-    mo_coeff = _factor_dm(dm, s1e, mo_coeff, mo_occ)
-    if numpy.iscomplexobj(mo_coeff):
-        raise NotImplementedError('complex orbitals are not supported')
-
-    if mypari.df_coeff is None:
-        mypari.build()
-
-    t0 = (logger.process_clock(), logger.perf_counter())
-    log = logger.new_logger(mypari)
-    mol = mypari.mol
-    auxmol = mypari.auxmol
-    layout = mypari.aopair_layout
-    nbx_layout = mypari.nbx_layout
-    auxslice = auxmol.aoslice_by_atom()
-    nocc = mo_coeff.shape[1]
-    naux = auxmol.nao_nr()
-
-    tnames = ('Dmat', 'j2c', 'Gmat', 'Hmat', 'Lmat')
-    tspans = numpy.zeros((5,2))
-    dtype = numpy.result_type(mo_coeff, numpy.double)
-    naux_by_atom = auxslice[:,3] - auxslice[:,2]
-    max_naux = numpy.max(naux_by_atom)
-    max_nactive = numpy.max(nbx_layout.nao_by_aux_atom)
-    max_d_size = numpy.max(
-        nocc * naux_by_atom * nbx_layout.nao_by_aux_atom)
-    mo_coeff = numpy.asarray(mo_coeff, dtype=dtype, order='C')
-    moT = numpy.asarray(mo_coeff.T, order='C')
-    Dbuf = numpy.empty(max_d_size, dtype=dtype)
-    Hbuf = numpy.empty(nocc*max_naux*nao, dtype=dtype)
-    Gbuf = numpy.empty(nao*max_naux*nao, dtype=dtype)
-    j2cbuf = numpy.empty(naux*max_naux, dtype=dtype)
-    Lbuf = numpy.empty(max_nactive*nao, dtype=dtype)
-    Lmat = numpy.zeros((nao, nao), dtype=dtype)
-    for A in range(mol.natm):
-        naux_A = auxslice[A,3] - auxslice[A,2]
-        nactive = nbx_layout.nao_by_aux_atom[A]
-
-        tick = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        out = Dbuf[:nocc*naux_A*nactive]
-        Dmat = mypari.half_transform(mo_coeff, A, out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[0] += tock - tick
-
-        tick = tock
-        out = j2cbuf[:naux*naux_A]
-        j2c = mypari.fill_j2c(A, out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[1] += tock - tick
-
-        tick = tock
-        out = Gbuf[:nao*naux_A*nao]
-        Gmat = _fill_g(mypari, A, j2c, out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[2] += tock - tick
-
-        tick = tock
-        Hmat = Hbuf[:nocc*naux_A*nao].reshape(nocc,naux_A,nao)
-        lib.dot(moT, Gmat.reshape(nao,naux_A*nao),
-                c=Hmat.reshape(nocc,naux_A*nao))
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[3] += tock - tick
-
-        tick = tock
-        out = Lbuf[:nactive*nao]
-        _build_l_nbx(
-            Lmat, Dmat, Hmat, nbx_layout.ao_idx[A], out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[4] += tock - tick
-
-    vk = Lmat + Lmat.T
-    for name, tspan in zip(tnames, tspans):
-        cpu0 = logger.process_clock() - tspan[0]
-        wall0 = logger.perf_counter() - tspan[1]
-        log.timer('PARI K ' + name, cpu0, wall0)
-
-    pair_factor = 2 - (layout.pair_atoms[:,0] ==
-                       layout.pair_atoms[:,1])
-    log.debug('PARI K calls: D %d sparse dgemm; '
-              'G %d fused pair jobs/%d metric products; '
-              'H %d dgemm; L %d NBX dgemm/scatter',
-              numpy.count_nonzero(numpy.diff(
-                  mypari.df_coeff.d_target_loc, axis=1)),
-              mol.natm*layout.npair, mol.natm*pair_factor.sum(),
-              mol.natm, mol.natm)
-    log.timer('PARI K', *t0)
-    return vk
-
-
-def _get_k_no_nbx(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None,
-                  omega=None, s1e=None):
-    # This reference does not exploit NBX sparsity. Each packed AO atom-pair
-    # block is evaluated, metric-corrected, and scattered to dense G in C.
-    if omega is not None:
-        raise NotImplementedError('range-separated exchange is not supported')
-    if hermi != 1:
-        raise NotImplementedError('PARI K only supports hermi=1')
-
-    dm_tag = dm
-    dm = numpy.asarray(dm)
-    nao = mypari.mol.nao_nr()
-    if dm.shape != (nao, nao):
-        raise NotImplementedError('PARI K only supports one density matrix')
-    if numpy.iscomplexobj(dm):
-        raise NotImplementedError('complex density matrices are not supported')
-
-    if mo_coeff is None:
-        mo_coeff = getattr(dm_tag, 'mo_coeff', None)
-        if mo_occ is None:
-            mo_occ = getattr(dm_tag, 'mo_occ', None)
-    if s1e is None and (mo_coeff is None or mo_occ is None):
-        s1e = mypari.mol.intor_symmetric('int1e_ovlp')
-    mo_coeff = _factor_dm(dm, s1e, mo_coeff, mo_occ)
-    if numpy.iscomplexobj(mo_coeff):
-        raise NotImplementedError('complex orbitals are not supported')
-
-    if mypari.df_coeff is None:
-        mypari.build()
-
-    t0 = (logger.process_clock(), logger.perf_counter())
-    log = logger.new_logger(mypari)
-    mol = mypari.mol
-    auxmol = mypari.auxmol
-    layout = mypari.aopair_layout
-    auxslice = auxmol.aoslice_by_atom()
-    nocc = mo_coeff.shape[1]
-    naux = auxmol.nao_nr()
-
-    tnames = ('Dmat', 'j2c', 'Gmat', 'Hmat', 'Lmat')
-    tspans = numpy.zeros((5,2))
-    dtype = numpy.result_type(mo_coeff, numpy.double)
-    max_naux = numpy.max(auxslice[:,3] - auxslice[:,2])
-    mo_coeff = numpy.asarray(mo_coeff, dtype=dtype, order='C')
-    moT = numpy.asarray(mo_coeff.T, order='C')
-    Dbuf = numpy.empty(nocc*max_naux*nao, dtype=dtype)
-    Hbuf = numpy.empty(nocc*max_naux*nao, dtype=dtype)
-    Gbuf = numpy.empty(nao*max_naux*nao, dtype=dtype)
-    j2cbuf = numpy.empty(naux*max_naux, dtype=dtype)
-    Lmat = numpy.zeros((nao, nao), dtype=dtype)
-    for A in range(mol.natm):
-        naux_A = auxslice[A,3] - auxslice[A,2]
-
-        tick = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        out = Dbuf[:nocc*naux_A*nao]
-        Dmat = mypari.half_transform(
-            mo_coeff, A, compact=False, out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[0] += tock - tick
-
-        tick = tock
-        out = j2cbuf[:naux*naux_A]
-        j2c = mypari.fill_j2c(A, out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[1] += tock - tick
-
-        tick = tock
-        out = Gbuf[:nao*naux_A*nao]
-        Gmat = _fill_g(mypari, A, j2c, out=out)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[2] += tock - tick
-
-        tick = tock
-        Hmat = Hbuf[:nocc*naux_A*nao].reshape(nocc,naux_A,nao)
-        lib.dot(moT, Gmat.reshape(nao,naux_A*nao),
-                c=Hmat.reshape(nocc,naux_A*nao))
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[3] += tock - tick
-
-        tick = tock
-        lib.dot(Dmat.reshape(nocc*naux_A,nao).T,
-                Hmat.reshape(nocc*naux_A,nao), c=Lmat, beta=1)
-        tock = numpy.asarray(
-            (logger.process_clock(), logger.perf_counter()))
-        tspans[4] += tock - tick
-
-    vk = Lmat + Lmat.T
-    for name, tspan in zip(tnames, tspans):
-        cpu0 = logger.process_clock() - tspan[0]
-        wall0 = logger.perf_counter() - tspan[1]
-        log.timer('PARI K ' + name, cpu0, wall0)
-
-    pair_factor = 2 - (layout.pair_atoms[:,0] ==
-                       layout.pair_atoms[:,1])
-    log.debug('PARI K calls: D %d sparse dgemm; '
-              'G %d fused pair jobs/%d metric products; '
-              'H %d dgemm; L %d dgemm',
-              numpy.count_nonzero(numpy.diff(
-                  mypari.df_coeff.d_target_loc, axis=1)),
-              mol.natm*layout.npair, mol.natm*pair_factor.sum(),
-              mol.natm, mol.natm)
     log.timer('PARI K', *t0)
     return vk
 

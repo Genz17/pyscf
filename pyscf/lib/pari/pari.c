@@ -295,54 +295,13 @@ void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
 }
 
 
-static void _scatter_pair(double *G, const double *packed,
-                          int nao, int naux, int64_t shlpr0, int64_t shlpr1,
-                          const int *shlpr, const int64_t *aopair_loc,
-                          int64_t aopair0, const int *ao_loc)
-{
-    for (int64_t ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
-        const int ish = shlpr[ijsh*2  ];
-        const int jsh = shlpr[ijsh*2+1];
-        const int i0 = ao_loc[ish];
-        const int j0 = ao_loc[jsh];
-        const int di = ao_loc[ish+1] - i0;
-        const int dj = ao_loc[jsh+1] - j0;
-        int64_t row = aopair_loc[ijsh] - aopair0;
-
-        if (ish == jsh) {
-            for (int i = 0; i < di; i++) {
-                for (int j = i; j < dj; j++, row++) {
-                    for (int p = 0; p < naux; p++) {
-                        const double v = packed[(size_t)row*naux+p];
-                        G[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
-                        G[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
-                    }
-                }
-            }
-        } else {
-            for (int i = 0; i < di; i++) {
-                for (int j = 0; j < dj; j++, row++) {
-                    for (int p = 0; p < naux; p++) {
-                        const double v = packed[(size_t)row*naux+p];
-                        G[((size_t)(i0+i)*naux+p)*nao+j0+j] = v;
-                        G[((size_t)(j0+j)*naux+p)*nao+i0+i] = v;
-                    }
-                }
-            }
-        }
-    }
-}
-
-
 /*
- * Evaluate and metric-correct each canonical AO atom pair. If sparse is
- * false, scatter the result to G[AO1,aux,AO2] in C-order. Otherwise,
- * retain the packed G[naopair,aux] layout.
+ * Evaluate and metric-correct each canonical AO atom pair. Retain the
+ * packed G[naopair,aux] layout.
  */
 void PARIfill_g(CINTIntegralFunction *intor, double *G,
-                int sparse,
                 const double *coeff, const double *j2c,
-                int nao, int naux, int npair, const int *pair_atoms,
+                int naux, int npair, const int *pair_atoms,
                 const int64_t *pair_aopair_loc, const int64_t *shlpr_loc,
                 const int *shlpr, const int64_t *aopair_loc,
                 const int *ao_loc, const int64_t *coeff_offsets,
@@ -358,28 +317,11 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
         intor, shls_slice, atm, natm, bas, nbas, env);
     const size_t intbuf_size = _max_shell_size(
         0, shlpr_loc[npair], shlpr, ksh0, ksh1, ao_loc);
-    int64_t max_nrow = 0;
-
-    for (int pair = 0; pair < npair; pair++) {
-        const int64_t nrow = pair_aopair_loc[pair+1]
-                           - pair_aopair_loc[pair];
-        if (nrow > max_nrow) {
-            max_nrow = nrow;
-        }
-    }
-    if (sparse) {
-        memset(G, 0, sizeof(double) *
-               (size_t)pair_aopair_loc[npair]*naux);
-    } else {
-        memset(G, 0, sizeof(double) * (size_t)nao*naux*nao);
-    }
+    memset(G, 0, sizeof(double) *
+           (size_t)pair_aopair_loc[npair]*naux);
 
 #pragma omp parallel
 {
-    double *gbuf = NULL;
-    if (!sparse) {
-        gbuf = malloc(sizeof(double) * (size_t)max_nrow*naux);
-    }
     double *intbuf = malloc(sizeof(double) * intbuf_size);
     double *cache = malloc(sizeof(double) * cache_size);
 
@@ -391,8 +333,7 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
         const int nrow = pair_aopair_loc[pair+1] - aopair0;
         const int64_t shlpr0 = shlpr_loc[pair];
         const int64_t shlpr1 = shlpr_loc[pair+1];
-        double *gpair = sparse ? G + (size_t)aopair0*naux : gbuf;
-        memset(gpair, 0, sizeof(double) * (size_t)nrow*naux);
+        double *gpair = G + (size_t)aopair0*naux;
 
         for (int64_t ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
             const int ish = shlpr[ijsh*2  ];
@@ -435,12 +376,7 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
                    &D1, gpair, &naux);
         }
 
-        if (!sparse) {
-            _scatter_pair(G, gpair, nao, naux, shlpr0, shlpr1,
-                          shlpr, aopair_loc, aopair0, ao_loc);
-        }
     }
-    free(gbuf);
     free(intbuf);
     free(cache);
 }
