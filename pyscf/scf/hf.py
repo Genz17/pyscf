@@ -2258,6 +2258,11 @@ This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
                 'incorrect nuclear gradients, TDDFT and other methods.')
         return pyscf.df.df_jk.density_fit(self, auxbasis, with_df, only_dfj)
 
+    def pari(self, auxbasis=None, with_pari=None, schwarz_tol=1e-12):
+        import pyscf.pari.pari_jk
+        return pyscf.pari.pari_jk.pari(
+            self, auxbasis, with_pari, schwarz_tol)
+
     def multigrid_numint(self, margin=None, mesh=None):
         '''Apply the MultiGrid algorithm for XC numerical integartion.
 

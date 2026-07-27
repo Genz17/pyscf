@@ -18,13 +18,93 @@
 
 import ctypes
 import numpy
+import scipy.linalg
 
 from pyscf import gto
 from pyscf import lib
 from pyscf.df import df_jk
 from pyscf.gto import moleintor
 from pyscf.lib import logger
-from pyscf.pari import pari
+from pyscf.pari import pari as pari_module
+
+
+def pari(mf, auxbasis=None, with_pari=None, schwarz_tol=1e-12):
+    '''Apply PARI J/K builders to an RHF object.'''
+    from pyscf import scf
+
+    if (not isinstance(mf, scf.hf.RHF) or mf.istype('ROHF') or
+        isinstance(mf, scf.hf.KohnShamDFT)):
+        raise NotImplementedError('PARI SCF only supports RHF')
+    if isinstance(mf, df_jk._DFHF):
+        raise RuntimeError('PARI cannot be combined with density_fit')
+
+    if with_pari is None:
+        with_pari = pari_module.PARI(
+            mf.mol, auxbasis=auxbasis, schwarz_tol=schwarz_tol)
+        with_pari.max_memory = mf.max_memory
+        with_pari.stdout = mf.stdout
+        with_pari.verbose = mf.verbose
+    elif not isinstance(with_pari, pari_module.PARI):
+        raise TypeError('with_pari must be a PARI object')
+    elif with_pari.mol is not mf.mol:
+        raise ValueError('with_pari and mf must use the same mol')
+
+    if isinstance(mf, _PARIHF):
+        mf = mf.copy()
+        mf.with_pari = with_pari
+        mf.direct_scf = False
+        return mf
+
+    parimf = _PARIHF(mf, with_pari)
+    return lib.set_class(parimf, (_PARIHF, mf.__class__))
+
+
+class _PARIHF:
+    '''RHF mixin using global DF for J and PARI for K.'''
+
+    __name_mixin__ = 'PARI'
+
+    _keys = {'with_pari'}
+
+    def __init__(self, mf, with_pari=None):
+        self.__dict__.update(mf.__dict__)
+        self._eri = None
+        self.with_pari = with_pari
+        self.direct_scf = False
+
+    def undo_pari(self):
+        obj = lib.view(self, lib.drop_class(self.__class__, _PARIHF))
+        del obj.with_pari
+        return obj
+
+    def reset(self, mol=None):
+        if self.with_pari:
+            self.with_pari.reset(mol)
+        return super().reset(mol)
+
+    def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
+               omega=None):
+        assert (with_j or with_k)
+        if mol is None: mol = self.mol
+        if dm is None: dm = self.make_rdm1()
+        if not self.with_pari:
+            return super().get_jk(mol, dm, hermi, with_j, with_k, omega)
+        if mol is not self.mol:
+            raise ValueError('PARI does not support a different mol in get_jk')
+
+        return self.with_pari.get_jk(
+            dm, hermi, with_j, with_k, self.direct_scf_tol,
+            omega=omega)
+
+    def density_fit(self, *args, **kwargs):
+        raise RuntimeError('PARI cannot be combined with density_fit')
+
+    def nuc_grad_method(self):
+        raise NotImplementedError('PARI nuclear gradients are not supported')
+    Gradients = nuc_grad_method
+
+    def Hessian(self):
+        raise NotImplementedError('PARI Hessians are not supported')
 
 
 def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
@@ -34,7 +114,7 @@ def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
     auxmol = mypari.auxmol
     layout = mypari.aopair_layout
     df_coeff = mypari.df_coeff
-    if numpy.any(layout.pair_kind != pari.AOPAIR_LAYOUT.SPARSE):
+    if numpy.any(layout.pair_kind != pari_module.AOPAIR_LAYOUT.SPARSE):
         raise NotImplementedError('dense atom-pair blocks are not implemented')
     if not 0 <= aux_atom < auxmol.natm:
         raise IndexError('auxiliary atom index out of range')
@@ -74,7 +154,7 @@ def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
             cintopt = moleintor.make_cintopt(
                 atm, bas[:mol.nbas], env, intor)
 
-        pari.libpari.PARIfill_g(
+        pari_module.libpari.PARIfill_g(
             getattr(moleintor.libcgto, intor),
             mat.ctypes.data_as(ctypes.c_void_p),
             df_coeff._data.ctypes.data_as(ctypes.c_void_p),
@@ -118,7 +198,7 @@ def _build_l_nbx(L, D, H, ao_idx, out=None):
         ndp = D.shape[0] * D.shape[1]
         lib.dot(D.reshape(ndp,len(ao_idx)).T,
                 H.reshape(ndp,L.shape[1]), c=buf)
-        pari.libpari.PARIscatter_l_nbx(
+        pari_module.libpari.PARIscatter_l_nbx(
             L.ctypes.data_as(ctypes.c_void_p),
             buf.ctypes.data_as(ctypes.c_void_p),
             ao_idx.ctypes.data_as(ctypes.c_void_p),
@@ -139,7 +219,8 @@ def get_j(mypari, dm, hermi=1, direct_scf_tol=1e-13, omega=None):
     return vj
 
 
-def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
+def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
+          s1e=None):
     # NBX compresses the auxiliary-AO pair in D. H remains dense, and the
     # final contraction is evaluated only for active AO rows.
     if omega is not None:
@@ -159,7 +240,9 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
         mo_coeff = getattr(dm_tag, 'mo_coeff', None)
         if mo_occ is None:
             mo_occ = getattr(dm_tag, 'mo_occ', None)
-    mo_coeff = _factor_dm(dm, mo_coeff, mo_occ)
+    if s1e is None and (mo_coeff is None or mo_occ is None):
+        s1e = mypari.mol.intor_symmetric('int1e_ovlp')
+    mo_coeff = _factor_dm(dm, s1e, mo_coeff, mo_occ)
     if numpy.iscomplexobj(mo_coeff):
         raise NotImplementedError('complex orbitals are not supported')
 
@@ -253,7 +336,7 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
 
 
 def _get_k_no_nbx(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None,
-                  omega=None):
+                  omega=None, s1e=None):
     # This reference does not exploit NBX sparsity. Each packed AO atom-pair
     # block is evaluated, metric-corrected, and scattered to dense G in C.
     if omega is not None:
@@ -273,7 +356,9 @@ def _get_k_no_nbx(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None,
         mo_coeff = getattr(dm_tag, 'mo_coeff', None)
         if mo_occ is None:
             mo_occ = getattr(dm_tag, 'mo_occ', None)
-    mo_coeff = _factor_dm(dm, mo_coeff, mo_occ)
+    if s1e is None and (mo_coeff is None or mo_occ is None):
+        s1e = mypari.mol.intor_symmetric('int1e_ovlp')
+    mo_coeff = _factor_dm(dm, s1e, mo_coeff, mo_occ)
     if numpy.iscomplexobj(mo_coeff):
         raise NotImplementedError('complex orbitals are not supported')
 
@@ -359,7 +444,8 @@ def _get_k_no_nbx(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None,
     return vk
 
 
-def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
+def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
+               s1e=None):
     if omega is not None:
         raise NotImplementedError('range-separated exchange is not supported')
     if hermi != 1:
@@ -377,7 +463,9 @@ def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
         mo_coeff = getattr(dm_tag, 'mo_coeff', None)
         if mo_occ is None:
             mo_occ = getattr(dm_tag, 'mo_occ', None)
-    mo_coeff = _factor_dm(dm, mo_coeff, mo_occ)
+    if s1e is None and (mo_coeff is None or mo_occ is None):
+        s1e = mypari.mol.intor_symmetric('int1e_ovlp')
+    mo_coeff = _factor_dm(dm, s1e, mo_coeff, mo_occ)
     if numpy.iscomplexobj(mo_coeff):
         raise NotImplementedError('complex orbitals are not supported')
 
@@ -504,16 +592,17 @@ def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
 
 
 def get_jk(mypari, dm, hermi=1, with_j=True, with_k=True,
-           direct_scf_tol=1e-13, mo_coeff=None, mo_occ=None, omega=None):
+           direct_scf_tol=1e-13, mo_coeff=None, mo_occ=None, omega=None,
+           s1e=None):
     vj = vk = None
     if with_j:
         vj = get_j(mypari, dm, hermi, direct_scf_tol, omega)
     if with_k:
-        vk = get_k(mypari, dm, hermi, mo_coeff, mo_occ, omega)
+        vk = get_k(mypari, dm, hermi, mo_coeff, mo_occ, omega, s1e)
     return vj, vk
 
 
-def _factor_dm(dm, mo_coeff=None, mo_occ=None):
+def _factor_dm(dm, s1e, mo_coeff=None, mo_occ=None):
     if mo_coeff is not None and mo_occ is not None:
         mo_coeff = numpy.asarray(mo_coeff)
         mo_occ = numpy.asarray(mo_occ)
@@ -534,7 +623,12 @@ def _factor_dm(dm, mo_coeff=None, mo_occ=None):
             if numpy.allclose(dm1, dm, rtol=1e-8, atol=1e-10):
                 return mo_coeff
 
-    occ, coeff = numpy.linalg.eigh(dm)
+    s1e = numpy.asarray(s1e)
+    if s1e.shape != dm.shape:
+        raise ValueError('s1e has incompatible shape')
+    sdm = lib.dot(s1e, lib.dot(dm, s1e))
+    sdm = (sdm + sdm.T) * .5
+    occ, coeff = scipy.linalg.eigh(sdm, s1e)
     if occ[0] < -1e-10:
         raise ValueError('density matrix is not positive semidefinite')
     mask = occ > 1e-12

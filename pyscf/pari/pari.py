@@ -784,15 +784,16 @@ class PARI(lib.StreamObject):
         return pari_jk.get_j(
             self, dm, hermi, direct_scf_tol, omega)
 
-    def get_k(self, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None):
+    def get_k(self, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
+              s1e=None):
         from pyscf.pari import pari_jk
         return pari_jk.get_k(
-            self, dm, hermi, mo_coeff, mo_occ, omega)
+            self, dm, hermi, mo_coeff, mo_occ, omega, s1e)
 
     def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
                direct_scf_tol=1e-13, mo_coeff=None, mo_occ=None,
-               omega=None):
+               omega=None, s1e=None):
         from pyscf.pari import pari_jk
         return pari_jk.get_jk(
             self, dm, hermi, with_j, with_k, direct_scf_tol,
-            mo_coeff, mo_occ, omega)
+            mo_coeff, mo_occ, omega, s1e)
