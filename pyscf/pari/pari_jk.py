@@ -258,6 +258,12 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
     auxslice = auxmol.aoslice_by_atom()
     nocc = mo_coeff.shape[1]
     naux = auxmol.nao_nr()
+    atm, bas, env = gto.mole.conc_env(
+        mol._atm, mol._bas, mol._env,
+        auxmol._atm, auxmol._bas, auxmol._env)
+    intor = mol._add_suffix('int3c2e')
+    cintopt = moleintor.make_cintopt(
+        atm, bas[:mol.nbas], env, intor)
 
     tnames = ('Dmat', 'j2c', 'Gmat', 'Hmat', 'Lmat')
     tspans = numpy.zeros((5,2))
@@ -295,7 +301,8 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
 
         tick = tock
         out = Gbuf[:layout.naopair*naux_A]
-        Gmat = _fill_g(mypari, A, j2c, out=out)
+        Gmat = _fill_g(
+            mypari, A, j2c, out=out, cintopt=cintopt)
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
         tspans[2] += tock - tick
