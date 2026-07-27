@@ -295,34 +295,91 @@ void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
 }
 
 
+static void _scatter_jpair(double *vj, const double *jpair,
+                           int64_t shlpr0, int64_t shlpr1,
+                           const int *shlpr, const int64_t *aopair_loc,
+                           const int *ao_loc, int nao)
+{
+    const int64_t aopair0 = aopair_loc[shlpr0];
+
+    for (int64_t ijsh = shlpr0; ijsh < shlpr1; ijsh++) {
+        const int ish = shlpr[ijsh*2  ];
+        const int jsh = shlpr[ijsh*2+1];
+        const int i0 = ao_loc[ish];
+        const int j0 = ao_loc[jsh];
+        const int di = ao_loc[ish+1] - i0;
+        const int dj = ao_loc[jsh+1] - j0;
+        int64_t row = aopair_loc[ijsh] - aopair0;
+
+        if (ish == jsh) {
+            for (int i = 0; i < di; i++) {
+                for (int j = i; j < dj; j++, row++) {
+                    const double value = jpair[row];
+                    vj[(size_t)(i0+i)*nao+j0+j] += value;
+                    if (i != j) {
+                        vj[(size_t)(j0+j)*nao+i0+i] += value;
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < di; i++) {
+                for (int j = 0; j < dj; j++, row++) {
+                    const double value = jpair[row];
+                    vj[(size_t)(i0+i)*nao+j0+j] += value;
+                    vj[(size_t)(j0+j)*nao+i0+i] += value;
+                }
+            }
+        }
+    }
+}
+
+
 /*
  * Evaluate and metric-correct each canonical AO atom pair. Retain the
- * packed G[naopair,aux] layout.
+ * packed G[naopair,aux] layout. If vj is not NULL, contract the raw
+ * integrals with rho before applying the metric correction.
  */
-void PARIfill_g(CINTIntegralFunction *intor, double *G,
-                const double *coeff, const double *j2c,
-                int naux, int npair, const int *pair_atoms,
-                const int64_t *pair_aopair_loc, const int64_t *shlpr_loc,
-                const int *shlpr, const int64_t *aopair_loc,
-                const int *ao_loc, const int64_t *coeff_offsets,
-                const int64_t *aux_loc, int *shls_slice, CINTOpt *cintopt,
-                int *atm, int natm, int *bas, int nbas, double *env)
+static void _PARIfill_g(CINTIntegralFunction *intor, double *G,
+                        double *vj, const double *rho,
+                        const double *coeff, const double *j2c,
+                        int naux, int npair, const int *pair_atoms,
+                        const int64_t *pair_aopair_loc,
+                        const int64_t *shlpr_loc,
+                        const int *shlpr, const int64_t *aopair_loc,
+                        const int *ao_loc, const int64_t *coeff_offsets,
+                        const int64_t *aux_loc, int *shls_slice,
+                        CINTOpt *cintopt, int *atm, int natm,
+                        int *bas, int nbas, double *env)
 {
     const char TRANS_N = 'N';
+    const char TRANS_T = 'T';
+    const double D0 = 0;
     const double D1 = 1;
     const double DMHALF = -.5;
+    const int INC1 = 1;
     const int ksh0 = shls_slice[4];
     const int ksh1 = shls_slice[5];
+    const int nao = ao_loc[shls_slice[1]];
     const size_t cache_size = _max_cache_size(
         intor, shls_slice, atm, natm, bas, nbas, env);
     const size_t intbuf_size = _max_shell_size(
         0, shlpr_loc[npair], shlpr, ksh0, ksh1, ao_loc);
+    int max_nrow = 0;
+    for (int pair = 0; pair < npair; pair++) {
+        const int nrow = pair_aopair_loc[pair+1] -
+                         pair_aopair_loc[pair];
+        if (nrow > max_nrow) {
+            max_nrow = nrow;
+        }
+    }
     memset(G, 0, sizeof(double) *
            (size_t)pair_aopair_loc[npair]*naux);
 
 #pragma omp parallel
 {
     double *intbuf = malloc(sizeof(double) * intbuf_size);
+    double *jpair = vj == NULL ? NULL :
+                    malloc(sizeof(double) * max_nrow);
     double *cache = malloc(sizeof(double) * cache_size);
 
 #pragma omp for schedule(dynamic, 1)
@@ -360,6 +417,13 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
             }
         }
 
+        if (vj != NULL) {
+            dgemv_(&TRANS_T, &naux, &nrow, &D1, gpair, &naux,
+                   rho, &INC1, &D0, jpair, &INC1);
+            _scatter_jpair(vj, jpair, shlpr0, shlpr1,
+                           shlpr, aopair_loc, ao_loc, nao);
+        }
+
         const int naux0 = aux_loc[atom0+1] - aux_loc[atom0];
         const double *coeff0 = coeff + coeff_offsets[pair*3];
         const double *j2c0 = j2c + (size_t)aux_loc[atom0]*naux;
@@ -378,8 +442,44 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
 
     }
     free(intbuf);
+    free(jpair);
     free(cache);
 }
+}
+
+
+void PARIfill_g(CINTIntegralFunction *intor, double *G,
+                const double *coeff, const double *j2c,
+                int naux, int npair, const int *pair_atoms,
+                const int64_t *pair_aopair_loc, const int64_t *shlpr_loc,
+                const int *shlpr, const int64_t *aopair_loc,
+                const int *ao_loc, const int64_t *coeff_offsets,
+                const int64_t *aux_loc, int *shls_slice, CINTOpt *cintopt,
+                int *atm, int natm, int *bas, int nbas, double *env)
+{
+    _PARIfill_g(intor, G, NULL, NULL, coeff, j2c, naux, npair,
+                pair_atoms, pair_aopair_loc, shlpr_loc, shlpr,
+                aopair_loc, ao_loc, coeff_offsets, aux_loc, shls_slice,
+                cintopt, atm, natm, bas, nbas, env);
+}
+
+
+void PARIfill_gj(CINTIntegralFunction *intor, double *G,
+                 double *vj, const double *rho,
+                 const double *coeff, const double *j2c,
+                 int naux, int npair, const int *pair_atoms,
+                 const int64_t *pair_aopair_loc,
+                 const int64_t *shlpr_loc,
+                 const int *shlpr, const int64_t *aopair_loc,
+                 const int *ao_loc, const int64_t *coeff_offsets,
+                 const int64_t *aux_loc, int *shls_slice,
+                 CINTOpt *cintopt, int *atm, int natm,
+                 int *bas, int nbas, double *env)
+{
+    _PARIfill_g(intor, G, vj, rho, coeff, j2c, naux, npair,
+                pair_atoms, pair_aopair_loc, shlpr_loc, shlpr,
+                aopair_loc, ao_loc, coeff_offsets, aux_loc, shls_slice,
+                cintopt, atm, natm, bas, nbas, env);
 }
 
 

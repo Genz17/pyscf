@@ -110,6 +110,19 @@ class _PARIHF:
 def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
             out=None, cintopt=None):
     '''Build one metric-corrected G panel.'''
+    return _fill_g_drv(
+        mypari, aux_atom, j2c, intor, out, cintopt)
+
+
+def _fill_gj(mypari, aux_atom, j2c, rho, vj, intor='int3c2e',
+             out=None, cintopt=None):
+    '''Build one G panel and accumulate its raw integrals into J.'''
+    return _fill_g_drv(
+        mypari, aux_atom, j2c, intor, out, cintopt, rho, vj)
+
+
+def _fill_g_drv(mypari, aux_atom, j2c, intor='int3c2e',
+                out=None, cintopt=None, rho=None, vj=None):
     mol = mypari.mol
     auxmol = mypari.auxmol
     layout = mypari.aopair_layout
@@ -149,14 +162,35 @@ def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
         j2c.shape[1] != naux):
         raise ValueError('j2c panel has incompatible shape')
 
+    if (rho is None) != (vj is None):
+        raise ValueError('rho and vj must be provided together')
+    if rho is not None:
+        rho = numpy.asarray(rho, dtype=numpy.double, order='C')
+        vj = numpy.asarray(vj)
+        if rho.shape != (naux,):
+            raise ValueError('rho panel has incompatible shape')
+        if (vj.shape != (mol.nao_nr(), mol.nao_nr()) or
+            vj.dtype != numpy.double or not vj.flags.c_contiguous):
+            raise ValueError('vj must be a C-contiguous double array')
+
     if mat.size > 0:
         if cintopt is None:
             cintopt = moleintor.make_cintopt(
                 atm, bas[:mol.nbas], env, intor)
 
-        pari_module.libpari.PARIfill_g(
+        if rho is None:
+            fill = pari_module.libpari.PARIfill_g
+            jargs = ()
+        else:
+            fill = pari_module.libpari.PARIfill_gj
+            jargs = (
+                vj.ctypes.data_as(ctypes.c_void_p),
+                rho.ctypes.data_as(ctypes.c_void_p),
+            )
+        fill(
             getattr(moleintor.libcgto, intor),
             mat.ctypes.data_as(ctypes.c_void_p),
+            *jargs,
             df_coeff._data.ctypes.data_as(ctypes.c_void_p),
             j2c.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(naux),
@@ -219,8 +253,89 @@ def get_j(mypari, dm, hermi=1, direct_scf_tol=1e-13, omega=None):
     return vj
 
 
+def _get_jrho(mypari, dm, direct_scf_tol=1e-13):
+    '''DF-J pass 1 and metric solve.'''
+    from pyscf.scf import _vhf
+    from pyscf.scf import jk
+
+    log = logger.new_logger(mypari)
+    mypari._build_auxmol()
+    mydf = mypari._j_df
+    mydf.max_memory = mypari.max_memory
+    mydf.stdout = mypari.stdout
+    mydf.verbose = mypari.verbose
+
+    if mydf._vjopt is None:
+        mol = mypari.mol
+        auxmol = mypari.auxmol
+        mydf.auxmol = auxmol
+        opt = _vhf._VHFOpt(
+            mol, 'int3c2e', 'CVHFnr3c2e_schwarz_cond',
+            dmcondname='CVHFnr_dm_cond',
+            direct_scf_tol=direct_scf_tol)
+        opt.init_cvhf_direct(
+            mol, 'int2e', 'CVHFnr_int2e_q_cond')
+
+        j2c = auxmol.intor('int2c2e', hermi=1)
+        j2c_diag = numpy.sqrt(abs(j2c.diagonal()))
+        aux_loc = auxmol.ao_loc
+        aux_q_cond = [
+            j2c_diag[i0:i1].max()
+            for i0, i1 in zip(aux_loc[:-1], aux_loc[1:])]
+        opt.q_cond = numpy.hstack((opt.q_cond.ravel(), aux_q_cond))
+
+        try:
+            opt.j2c = scipy.linalg.cho_factor(j2c, lower=True)
+            opt.j2c_type = 'cd'
+        except scipy.linalg.LinAlgError:
+            opt.j2c = j2c
+            opt.j2c_type = 'regular'
+
+        bas_placeholder = numpy.array(
+            [0, 0, 1, 1, 0, 0, 0, 0], dtype=numpy.int32)
+        fakemol = mol + auxmol
+        fakemol._bas = numpy.vstack((fakemol._bas, bas_placeholder))
+        opt.fakemol = fakemol
+        mydf._vjopt = opt
+
+    opt = mydf._vjopt
+    mol = mypari.mol
+    auxmol = mydf.auxmol
+    dm = numpy.asarray(dm, dtype=numpy.double, order='C')
+    if dm.shape != (mol.nao_nr(), mol.nao_nr()):
+        raise NotImplementedError('fused PARI J/K supports one density matrix')
+
+    nbas = mol.nbas
+    nbas1 = nbas + auxmol.nbas
+    shls_slice = (
+        0, nbas, 0, nbas, nbas, nbas1, nbas1, nbas1+1)
+    t0 = (logger.process_clock(), logger.perf_counter())
+    with lib.temporary_env(
+            opt, prescreen='CVHFnr3c2e_vj_pass1_prescreen'):
+        jaux = jk.get_jk(
+            opt.fakemol, dm[numpy.newaxis],
+            ['ijkl,ji->kl'], 'int3c2e', aosym='s2ij',
+            hermi=0, shls_slice=shls_slice, vhfopt=opt)
+    jaux = numpy.asarray(jaux)[:,:,0]
+    log.timer('PARI JK J pass 1', *t0)
+
+    t0 = (logger.process_clock(), logger.perf_counter())
+    if opt.j2c_type == 'cd':
+        rho = scipy.linalg.cho_solve(opt.j2c, jaux.T)
+    else:
+        rho = scipy.linalg.solve(opt.j2c, jaux.T)
+    log.timer('PARI JK J solve', *t0)
+    return numpy.asarray(rho[:,0], order='C')
+
+
 def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
           s1e=None):
+    return _get_k(
+        mypari, dm, hermi, mo_coeff, mo_occ, omega, s1e)
+
+
+def _get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
+           s1e=None, rho=None):
     # G retains the sparse AO-pair layout. The same target/source
     # half-transform used for D builds H without scattering G to dense.
     if omega is not None:
@@ -280,7 +395,13 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
     j2cbuf = numpy.empty(naux*max_naux, dtype=dtype)
     Lbuf = numpy.empty(max_nactive*nao, dtype=dtype)
     Lmat = numpy.zeros((nao, nao), dtype=dtype)
+    if rho is not None:
+        rho = numpy.asarray(rho, dtype=numpy.double, order='C')
+        if rho.shape != (naux,):
+            raise ValueError('rho has incompatible shape')
+        vj = numpy.zeros((nao, nao), dtype=numpy.double)
     for A in range(mol.natm):
+        aux0, aux1 = auxslice[A,2:]
         naux_A = auxslice[A,3] - auxslice[A,2]
         nactive = nbx_layout.nao_by_aux_atom[A]
 
@@ -301,8 +422,13 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
 
         tick = tock
         out = Gbuf[:layout.naopair*naux_A]
-        Gmat = _fill_g(
-            mypari, A, j2c, out=out, cintopt=cintopt)
+        if rho is None:
+            Gmat = _fill_g(
+                mypari, A, j2c, out=out, cintopt=cintopt)
+        else:
+            Gmat = _fill_gj(
+                mypari, A, j2c, rho[aux0:aux1], vj,
+                out=out, cintopt=cintopt)
         tock = numpy.asarray(
             (logger.process_clock(), logger.perf_counter()))
         tspans[2] += tock - tick
@@ -327,14 +453,15 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
         tspans[4] += tock - tick
 
     vk = Lmat + Lmat.T
+    prefix = 'PARI K' if rho is None else 'PARI JK'
     for name, tspan in zip(tnames, tspans):
         cpu0 = logger.process_clock() - tspan[0]
         wall0 = logger.perf_counter() - tspan[1]
-        log.timer('PARI K ' + name, cpu0, wall0)
+        log.timer(prefix + ' ' + name, cpu0, wall0)
 
     pair_factor = 2 - (layout.pair_atoms[:,0] ==
                        layout.pair_atoms[:,1])
-    log.debug('PARI K calls: D %d sparse dgemm; '
+    log.debug(prefix + ' calls: D %d sparse dgemm; '
               'G %d fused pair jobs/%d metric products; '
               'H %d sparse dgemm; L %d NBX dgemm/scatter',
               numpy.count_nonzero(numpy.diff(
@@ -342,8 +469,11 @@ def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
               mol.natm*layout.npair, mol.natm*pair_factor.sum(),
               mol.natm*numpy.count_nonzero(numpy.diff(layout.target_loc)),
               mol.natm)
-    log.timer('PARI K', *t0)
-    return vk
+    if rho is None:
+        log.timer('PARI K', *t0)
+        return vk
+    log.timer('PARI JK K and J pass 2', *t0)
+    return vj, vk
 
 
 def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
@@ -496,12 +626,25 @@ def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
 def get_jk(mypari, dm, hermi=1, with_j=True, with_k=True,
            direct_scf_tol=1e-13, mo_coeff=None, mo_occ=None, omega=None,
            s1e=None):
-    vj = vk = None
-    if with_j:
-        vj = get_j(mypari, dm, hermi, direct_scf_tol, omega)
-    if with_k:
-        vk = get_k(mypari, dm, hermi, mo_coeff, mo_occ, omega, s1e)
-    return vj, vk
+    assert (with_j or with_k)
+    if with_j and with_k:
+        if omega is not None:
+            raise NotImplementedError(
+                'range-separated J/K is not supported')
+        if hermi != 1:
+            raise NotImplementedError('PARI K only supports hermi=1')
+        t0 = (logger.process_clock(), logger.perf_counter())
+        rho = _get_jrho(mypari, dm, direct_scf_tol)
+        vj, vk = _get_k(
+            mypari, dm, hermi, mo_coeff, mo_occ, omega, s1e, rho)
+        logger.timer(mypari, 'PARI JK', *t0)
+        return vj, vk
+    elif with_j:
+        return get_j(
+            mypari, dm, hermi, direct_scf_tol, omega), None
+    else:
+        return None, get_k(
+            mypari, dm, hermi, mo_coeff, mo_occ, omega, s1e)
 
 
 def _factor_dm(dm, s1e, mo_coeff=None, mo_occ=None):
