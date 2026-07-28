@@ -632,7 +632,6 @@ class PARI(lib.StreamObject):
         dense_buf_mem = max_naux * (
             2*nocc*nao + nao**2) * itemsize
         metric_mem = naux**2 * itemsize
-        metric_panel_mem = naux * max_naux * itemsize
         max_shell = numpy.diff(layout.ao_loc).max(initial=0)
         d_thread_mem = (lib.num_threads() * max_shell * max_naux *
                         (nocc + max_shell) * itemsize)
@@ -647,25 +646,19 @@ class PARI(lib.StreamObject):
             max_source * (max_shell*max_naux + nocc) +
             nocc*max_shell*max_naux) * itemsize
         thread_mem = max(d_thread_mem, h_thread_mem)
-        matrix_mem = 2 * nao**2 * itemsize
-        peak_mem = (coeff_mem + metric_panel_mem + buf_mem +
-                    thread_mem + matrix_mem)
-        log.info('Estimated PARI K peak memory = %.2f MB (nocc = %d)',
+        peak_mem = coeff_mem + metric_mem + buf_mem + thread_mem
+        log.info('Estimated PARI JK peak memory = %.2f MB (nocc = %d)',
                  peak_mem/1e6, nocc)
-        log.info('  coefficients %.2f MB, j2c panel %.2f MB, '
-                 'NBX-D/H/sparse-G/L-row buffers %.2f MB, '
-                 'L/K matrices %.2f MB',
-                 coeff_mem/1e6, metric_panel_mem/1e6, buf_mem/1e6,
-                 matrix_mem/1e6)
+        log.info('  coefficients %.2f MB, factorized j2c cache %.2f MB, '
+                 'NBX-D/H/sparse-G/L-row buffers %.2f MB',
+                 coeff_mem/1e6, metric_mem/1e6, buf_mem/1e6)
         log.info('  C-kernel thread buffers %.2f MB (%d threads)',
                  thread_mem/1e6, lib.num_threads())
-        log.info('  excluding the DF-J cache and caller-owned dm/mo_coeff')
+        log.info('  excluding caller-owned AO matrices and MO coefficients')
         log.info('  dense D/H/G buffers require %.2f MB',
                  dense_buf_mem/1e6)
-        log.info('  full fitting j2c requires %.2f MB and is not retained',
-                 metric_mem/1e6)
         if peak_mem/1e6 > MEMORY_WARN_THRESHOLD * self.max_memory:
-            log.warn('Estimated PARI K peak memory %.2f MB is more than '
+            log.warn('Estimated PARI JK peak memory %.2f MB is more than '
                      '%.0f%% of max_memory %.2f MB; available memory may '
                      'not be enough', peak_mem/1e6,
                      MEMORY_WARN_THRESHOLD*100, self.max_memory)
