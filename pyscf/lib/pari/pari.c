@@ -79,7 +79,19 @@ static void _zero_shell_pair(double *out, int comp, int i0, int j0,
  * Evaluate three-center integrals in the same layout as
  * df.incore.aux_e2(..., aosym='s1').
  *
- * out[naoi,naoj,naok,comp] in F-order
+ * Args:
+ *     out:
+ *         F-contiguous output with layout [naoi,naoj,naok,comp].
+ *     shls_slice:
+ *         AO1, AO2, and auxiliary shell ranges.
+ *     ao_loc:
+ *         AO offsets for the concatenated AO and auxiliary bases.
+ *     shlpr_mask:
+ *         Optional dense Boolean AO shell-pair mask.
+ *
+ * Returns:
+ *     The integral values are written to out. Skipped shell-pair blocks
+ *     are set to zero.
  */
 void fill_aux_e2(CINTIntegralFunction *intor, double *out, int comp,
                  int *shls_slice, int *ao_loc,
@@ -231,6 +243,21 @@ static void _zero_ints_sparse(double *out, int comp,
  * Evaluate selected AO shell pairs and pack them as
  * out[comp,naopair,naux] in C-order. For diagonal AO shells, only
  * i <= j is stored.
+ *
+ * Args:
+ *     out:
+ *         C-contiguous packed output.
+ *     shlpr0, shlpr1:
+ *         Range of shell-pair jobs in shlpr.
+ *     shlpr:
+ *         Retained AO shell pairs.
+ *     aopair_loc:
+ *         Packed AO-pair offsets for each shell pair.
+ *     shls_slice:
+ *         AO1, AO2, and auxiliary shell ranges.
+ *
+ * Returns:
+ *     The selected three-center integrals are written to out.
  */
 void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
                         int shlpr0, int shlpr1, const int *shlpr,
@@ -295,6 +322,7 @@ void fill_aux_e2_sparse(CINTIntegralFunction *intor, double *out, int comp,
 }
 
 
+/* Scatter one packed atom-pair Coulomb block to a symmetric AO matrix. */
 static void _scatter_jpair(double *vj, const double *jpair,
                            int64_t shlpr0, int64_t shlpr1,
                            const int *shlpr, const int64_t *aopair_loc,
@@ -338,6 +366,12 @@ static void _scatter_jpair(double *vj, const double *jpair,
  * Evaluate and metric-correct each canonical AO atom pair. Retain the
  * packed G[naopair,aux] layout. If vj is not NULL, contract the raw
  * integrals with rho before applying the metric correction.
+ *
+ * For an AO atom pair BC and auxiliary atom A,
+ *
+ *     G^A_BC = (BC|A)
+ *            - 1/2 d^B_BC (B|A)
+ *            - 1/2 d^C_BC (C|A).
  */
 static void _PARIfill_g(CINTIntegralFunction *intor, double *G,
                         double *vj, const double *rho,
@@ -448,6 +482,22 @@ static void _PARIfill_g(CINTIntegralFunction *intor, double *G,
 }
 
 
+/*
+ * Build one packed, metric-corrected G panel.
+ *
+ * Args:
+ *     G:
+ *         C-contiguous output with layout [naopair,naux_A].
+ *     coeff:
+ *         Contiguous PARI coefficient storage.
+ *     j2c:
+ *         Metric panel with layout [naux,naux_A].
+ *     pair_atoms, pair_aopair_loc, shlpr_loc, shlpr, aopair_loc:
+ *         Shared packed AO-pair layout.
+ *
+ * Returns:
+ *     The metric-corrected G panel is written to G.
+ */
 void PARIfill_g(CINTIntegralFunction *intor, double *G,
                 const double *coeff, const double *j2c,
                 int naux, int npair, const int *pair_atoms,
@@ -464,6 +514,24 @@ void PARIfill_g(CINTIntegralFunction *intor, double *G,
 }
 
 
+/*
+ * Build one G panel and accumulate the raw integrals into J.
+ *
+ * The Coulomb contraction is performed before the metric correction,
+ *
+ *     vj[mu,nu] += sum_P (mu nu|P) rho[P].
+ *
+ * Args:
+ *     G:
+ *         C-contiguous output with layout [naopair,naux_A].
+ *     vj:
+ *         Dense symmetric AO Coulomb matrix updated in place.
+ *     rho:
+ *         Fitted Coulomb density for the current auxiliary atom.
+ *
+ * Returns:
+ *     G is overwritten and vj is accumulated in place.
+ */
 void PARIfill_gj(CINTIntegralFunction *intor, double *G,
                  double *vj, const double *rho,
                  const double *coeff, const double *j2c,
@@ -486,6 +554,19 @@ void PARIfill_gj(CINTIntegralFunction *intor, double *G,
 /*
  * Half-transform sparse AO-pair data. Directed shell-pair jobs are
  * grouped by their target AO shell.
+ *
+ * Args:
+ *     out:
+ *         C-contiguous output with layout [nmo,naux,nao_out].
+ *     mo_coeff:
+ *         C-contiguous AO-to-MO coefficients [nao,nmo].
+ *     data:
+ *         Packed AO-pair data.
+ *     target_loc, source_shell, data_offset, edge_kind:
+ *         Directed target/source shell-pair representation.
+ *
+ * Returns:
+ *     The half-transformed tensor is written to out.
  */
 void PARIhalf_transform(double *out, const double *mo_coeff,
                         const double *data,
@@ -596,7 +677,20 @@ void PARIhalf_transform(double *out, const double *mo_coeff,
 }
 
 
-/* Scatter active AO rows into L. */
+/*
+ * Scatter NBX-active AO rows into L.
+ *
+ * Args:
+ *     L:
+ *         Dense AO matrix updated in place.
+ *     buf:
+ *         Contiguous active-row buffer [nactive,nao].
+ *     ao_idx:
+ *         Global AO index for every active row.
+ *
+ * Returns:
+ *     The rows in buf are accumulated into L.
+ */
 void PARIscatter_l_nbx(double *L, const double *buf, const int *ao_idx,
                        int nao, int nactive)
 {

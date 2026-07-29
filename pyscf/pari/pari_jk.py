@@ -29,7 +29,23 @@ from pyscf.pari import pari as pari_module
 
 
 def pari(mf, auxbasis=None, with_pari=None, schwarz_tol=1e-12):
-    '''Apply PARI J/K builders to an RHF object.'''
+    '''Apply PARI J/K builders to an RHF object.
+
+    Args:
+        mf (pyscf.scf.hf.RHF):
+            Mean-field object to decorate.
+        auxbasis (str or dict):
+            Auxiliary-basis specification. The PySCF default JK-fitting
+            basis is used when omitted.
+        with_pari (pyscf.pari.PARI):
+            Optional prebuilt PARI object.
+        schwarz_tol (float):
+            AO shell-pair Schwarz threshold. Default is 1e-12.
+
+    Returns:
+        pyscf.scf.hf.RHF:
+            RHF object whose J/K builder is backed by ``with_pari``.
+    '''
     from pyscf import scf
 
     if (not isinstance(mf, scf.hf.RHF) or mf.istype('ROHF') or
@@ -73,17 +89,20 @@ class _PARIHF:
         self.direct_scf = False
 
     def undo_pari(self):
+        '''Remove the PARI mixin and return the underlying SCF object.'''
         obj = lib.view(self, lib.drop_class(self.__class__, _PARIHF))
         del obj.with_pari
         return obj
 
     def reset(self, mol=None):
+        '''Reset the SCF and associated PARI objects.'''
         if self.with_pari:
             self.with_pari.reset(mol)
         return super().reset(mol)
 
     def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None):
+        '''Build Coulomb and exchange matrices through ``with_pari``.'''
         assert (with_j or with_k)
         if mol is None: mol = self.mol
         if dm is None: dm = self.make_rdm1()
@@ -97,32 +116,78 @@ class _PARIHF:
             omega=omega)
 
     def density_fit(self, *args, **kwargs):
+        '''Reject simultaneous PARI and conventional DF SCF mixins.'''
         raise RuntimeError('PARI cannot be combined with density_fit')
 
     def nuc_grad_method(self):
+        '''Return a PARI gradient object when gradient support is available.'''
         raise NotImplementedError('PARI nuclear gradients are not supported')
     Gradients = nuc_grad_method
 
     def Hessian(self):
+        '''Return a PARI Hessian object when Hessian support is available.'''
         raise NotImplementedError('PARI Hessians are not supported')
 
 
 def _fill_g(mypari, aux_atom, j2c, intor='int3c2e',
             out=None, cintopt=None):
-    '''Build one metric-corrected G panel.'''
+    '''Build one metric-corrected sparse G panel.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            Initialized PARI object.
+        aux_atom (int):
+            Atom whose auxiliary functions form the panel.
+        j2c (numpy.ndarray):
+            Metric panel with shape ``(naux, naux_A)``.
+        intor (str):
+            Three-center integral name. Default is ``'int3c2e'``.
+        out (numpy.ndarray):
+            Optional output buffer.
+        cintopt:
+            Optional libcint optimizer shared across auxiliary atoms.
+
+    Returns:
+        numpy.ndarray:
+            C-contiguous G panel with shape ``(naopair, naux_A)``.
+    '''
     return _fill_g_drv(
         mypari, aux_atom, j2c, intor, out, cintopt)
 
 
 def _fill_gj(mypari, aux_atom, j2c, rho, vj, intor='int3c2e',
              out=None, cintopt=None):
-    '''Build one G panel and accumulate its raw integrals into J.'''
+    '''Build one G panel and accumulate its raw integrals into J.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            Initialized PARI object.
+        aux_atom (int):
+            Atom whose auxiliary functions form the panel.
+        j2c (numpy.ndarray):
+            Metric panel with shape ``(naux, naux_A)``.
+        rho (numpy.ndarray):
+            Fitted Coulomb density for the current auxiliary atom.
+        vj (numpy.ndarray):
+            C-contiguous AO Coulomb matrix updated in place.
+        intor (str):
+            Three-center integral name. Default is ``'int3c2e'``.
+        out (numpy.ndarray):
+            Optional output buffer.
+        cintopt:
+            Optional libcint optimizer shared across auxiliary atoms.
+
+    Returns:
+        numpy.ndarray:
+            C-contiguous G panel with shape ``(naopair, naux_A)``.
+    '''
     return _fill_g_drv(
         mypari, aux_atom, j2c, intor, out, cintopt, rho, vj)
 
 
 def _fill_g_drv(mypari, aux_atom, j2c, intor='int3c2e',
                 out=None, cintopt=None, rho=None, vj=None):
+    '''Common driver for metric-corrected G and fused J/G panels.'''
     mol = mypari.mol
     auxmol = mypari.auxmol
     layout = mypari.aopair_layout
@@ -211,7 +276,30 @@ def _fill_g_drv(mypari, aux_atom, j2c, intor='int3c2e',
 
 
 def _build_l_nbx(L, D, H, ao_idx, out=None):
-    '''Contract NBX-compressed D with dense H and accumulate into L.'''
+    '''Contract NBX-compressed D with dense H and accumulate into L.
+
+    .. math::
+
+        L_{\\mu\\nu} \\mathrel{+}=
+        \\sum_{iP} D_{iP\\mu} H_{iP\\nu}.
+
+    Args:
+        L (numpy.ndarray):
+            C-contiguous AO matrix updated in place.
+        D (numpy.ndarray):
+            NBX-compressed D tensor with shape
+            ``(nmo, naux_A, nao_active)``.
+        H (numpy.ndarray):
+            H tensor with shape ``(nmo, naux_A, nao)``.
+        ao_idx (numpy.ndarray):
+            Global AO indices corresponding to the active D rows.
+        out (numpy.ndarray):
+            Optional contraction buffer.
+
+    Returns:
+        numpy.ndarray:
+            The updated ``L`` matrix.
+    '''
     L = numpy.asarray(L)
     D = numpy.asarray(D)
     H = numpy.asarray(H)
@@ -241,6 +329,25 @@ def _build_l_nbx(L, D, H, ao_idx, out=None):
 
 
 def get_j(mypari, dm, hermi=1, direct_scf_tol=1e-13, omega=None):
+    '''Build the Coulomb matrix with global density fitting.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            PARI object providing the molecule and auxiliary basis.
+        dm (numpy.ndarray):
+            AO density matrix.
+        hermi (int):
+            Hermiticity flag. Default is one.
+        direct_scf_tol (float):
+            Integral screening threshold. Default is 1e-13.
+        omega (float):
+            Range-separation parameter. Range separation is currently
+            unsupported.
+
+    Returns:
+        numpy.ndarray:
+            Coulomb matrix in the AO basis.
+    '''
     if omega is not None:
         raise NotImplementedError('range-separated Coulomb is not supported')
 
@@ -254,7 +361,25 @@ def get_j(mypari, dm, hermi=1, direct_scf_tol=1e-13, omega=None):
 
 
 def _get_jrho(mypari, dm, direct_scf_tol=1e-13):
-    '''DF-J pass 1 and metric solve.'''
+    '''Build the fitted auxiliary density for DF-J.
+
+    .. math::
+
+        \\rho_P = \\sum_Q (P|Q)^{-1}
+        \\sum_{\\mu\\nu} (Q|\\mu\\nu)D_{\\nu\\mu}.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            PARI object providing the molecule and auxiliary basis.
+        dm (numpy.ndarray):
+            AO density matrix.
+        direct_scf_tol (float):
+            Integral screening threshold. Default is 1e-13.
+
+    Returns:
+        numpy.ndarray:
+            C-contiguous fitted density with shape ``(naux,)``.
+    '''
     from pyscf.scf import _vhf
     from pyscf.scf import jk
 
@@ -330,12 +455,57 @@ def _get_jrho(mypari, dm, direct_scf_tol=1e-13):
 
 def get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
           s1e=None):
+    '''Build the exchange matrix with PARI.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            Initialized PARI object.
+        dm (numpy.ndarray):
+            AO density matrix.
+        hermi (int):
+            Hermiticity flag. Only one is supported.
+        mo_coeff (numpy.ndarray):
+            Optional AO-to-MO coefficients.
+        mo_occ (numpy.ndarray):
+            Optional MO occupations.
+        omega (float):
+            Range-separation parameter. Range separation is currently
+            unsupported.
+        s1e (numpy.ndarray):
+            AO overlap matrix used when ``dm`` must be factorized.
+
+    Returns:
+        numpy.ndarray:
+            Exchange matrix in the AO basis.
+    '''
     return _get_k(
         mypari, dm, hermi, mo_coeff, mo_occ, omega, s1e)
 
 
 def _get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
            s1e=None, rho=None):
+    '''Build PARI K and optionally accumulate fused DF-J pass 2.
+
+    For the currently supported real-orbital case, the main intermediates
+    are
+
+    .. math::
+
+        D_{iP\\mu} &= \\sum_\\sigma M_{\\sigma i}d_{P\\sigma\\mu}, \\\\
+        G_{P\\lambda\\nu} &=
+            (P|\\lambda\\nu)
+            - \\frac{1}{2}\\sum_Q(P|Q)d_{Q\\lambda\\nu}, \\\\
+        H_{iP\\nu} &= \\sum_\\lambda M_{\\lambda i}
+            G_{P\\lambda\\nu}, \\\\
+        L_{\\mu\\nu} &= \\sum_{iP}D_{iP\\mu}H_{iP\\nu}, \\\\
+        K_{\\mu\\nu} &= L_{\\mu\\nu} + L_{\\nu\\mu}.
+
+    These steps correspond to the D, E/G, H, and L intermediates in
+    Table 1 of the Head-Gordon PARI-K paper. The implementation processes
+    one auxiliary atom at a time. D is NBX-compressed, G retains the
+    packed AO shell-pair layout, H is formed by a sparse half
+    transformation, and L is accumulated into the dense AO matrix.
+    '''
     # G retains the sparse AO-pair layout. The same target/source
     # half-transform used for D builds H without scattering G to dense.
     if omega is not None:
@@ -478,6 +648,29 @@ def _get_k(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
 
 def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
                s1e=None):
+    '''Build PARI K with the reference dense-G Python implementation.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            Initialized PARI object.
+        dm (numpy.ndarray):
+            AO density matrix.
+        hermi (int):
+            Hermiticity flag. Only one is supported.
+        mo_coeff (numpy.ndarray):
+            Optional AO-to-MO coefficients.
+        mo_occ (numpy.ndarray):
+            Optional MO occupations.
+        omega (float):
+            Range-separation parameter. Range separation is currently
+            unsupported.
+        s1e (numpy.ndarray):
+            AO overlap matrix used when ``dm`` must be factorized.
+
+    Returns:
+        numpy.ndarray:
+            Exchange matrix in the AO basis.
+    '''
     if omega is not None:
         raise NotImplementedError('range-separated exchange is not supported')
     if hermi != 1:
@@ -626,6 +819,39 @@ def get_k_slow(mypari, dm, hermi=1, mo_coeff=None, mo_occ=None, omega=None,
 def get_jk(mypari, dm, hermi=1, with_j=True, with_k=True,
            direct_scf_tol=1e-13, mo_coeff=None, mo_occ=None, omega=None,
            s1e=None):
+    '''Build Coulomb and exchange matrices.
+
+    J pass 2 is fused with the PARI K integral pass when both matrices are
+    requested.
+
+    Args:
+        mypari (pyscf.pari.PARI):
+            Initialized PARI object.
+        dm (numpy.ndarray):
+            AO density matrix.
+        hermi (int):
+            Hermiticity flag. Only one is supported when K is requested.
+        with_j (bool):
+            Build the Coulomb matrix. Default is True.
+        with_k (bool):
+            Build the exchange matrix. Default is True.
+        direct_scf_tol (float):
+            DF-J integral screening threshold. Default is 1e-13.
+        mo_coeff (numpy.ndarray):
+            Optional AO-to-MO coefficients.
+        mo_occ (numpy.ndarray):
+            Optional MO occupations.
+        omega (float):
+            Range-separation parameter. Range separation is currently
+            unsupported.
+        s1e (numpy.ndarray):
+            AO overlap matrix used when ``dm`` must be factorized.
+
+    Returns:
+        tuple of numpy.ndarray:
+            Coulomb and exchange matrices. A matrix is None when its
+            corresponding build flag is False.
+    '''
     assert (with_j or with_k)
     if with_j and with_k:
         if omega is not None:
@@ -648,6 +874,27 @@ def get_jk(mypari, dm, hermi=1, with_j=True, with_k=True,
 
 
 def _factor_dm(dm, s1e, mo_coeff=None, mo_occ=None):
+    '''Factor a positive-semidefinite AO density matrix.
+
+    The returned factor C satisfies ``dm = C @ C.T``. Tagged or explicitly
+    supplied orbitals are used when available; otherwise, a generalized
+    eigendecomposition in the AO metric is performed.
+
+    Args:
+        dm (numpy.ndarray):
+            AO density matrix.
+        s1e (numpy.ndarray):
+            AO overlap matrix. It may be None when orbital information is
+            supplied.
+        mo_coeff (numpy.ndarray):
+            Optional AO-to-MO coefficients.
+        mo_occ (numpy.ndarray):
+            Optional nonnegative MO occupations.
+
+    Returns:
+        numpy.ndarray:
+            Density factor with shape ``(nao, rank)``.
+    '''
     if mo_coeff is not None and mo_occ is not None:
         mo_coeff = numpy.asarray(mo_coeff)
         mo_occ = numpy.asarray(mo_occ)
@@ -681,6 +928,7 @@ def _factor_dm(dm, s1e, mo_coeff=None, mo_occ=None):
 
 
 def _unpack_aopair(out, packed, layout, pair):
+    '''Scatter one packed canonical atom-pair block into a dense tensor.'''
     shlpr0, shlpr1 = layout.shlpr_loc[pair:pair+2]
     aopair0 = layout.aopair_loc[shlpr0]
     ao_loc = layout.ao_loc
