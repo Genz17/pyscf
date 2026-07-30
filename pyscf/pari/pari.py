@@ -1263,6 +1263,8 @@ class PARI(lib.StreamObject):
                 corresponding build flag is False.
         '''
         from pyscf.pari import pari_jk
+        if with_k and self.df_coeff is None:
+            self.build()
         return pari_jk.get_jk(
             self, dm, hermi, with_j, with_k, direct_scf_tol,
             mo_coeff, mo_occ, omega, s1e)

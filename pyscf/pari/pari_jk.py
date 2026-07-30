@@ -853,6 +853,10 @@ def get_jk(mypari, dm, hermi=1, with_j=True, with_k=True,
             corresponding build flag is False.
     '''
     assert (with_j or with_k)
+
+    if with_k and mypari.df_coeff is None:
+        mypari.build()
+
     if with_j and with_k:
         if omega is not None:
             raise NotImplementedError(
