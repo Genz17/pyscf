@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+g Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 
@@ -89,3 +89,5 @@ tmp/
 # mypy
 .mypy_cache/
 
+.venv
+.pari_venv

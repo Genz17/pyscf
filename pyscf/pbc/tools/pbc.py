@@ -409,6 +409,52 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         if cell.dimension < 3:
             raise NotImplementedError
 
+    elif isinstance(exxdiv, str) and exxdiv.startswith('stc_sph'):
+        w = float(exxdiv.split('_')[-1])
+        Rc = (3*Nk*cell.vol/(4*np.pi))**(1./3)
+        if w < 0:
+            w = abs(w) / Rc
+        with np.errstate(divide='ignore',invalid='ignore'):
+            coulG = (4*np.pi/absG2)*(1.0 - np.cos(np.sqrt(absG2)*Rc) * np.exp(-absG2*0.25/(w**2.)))
+        coulG[absG2==0] = 4*np.pi*(0.5*Rc**2 + 0.25/w**2.)
+
+        if cell.dimension < 3:
+            raise NotImplementedError
+
+    elif isinstance(exxdiv, str) and exxdiv.startswith('stc_ws'):
+        w = float(exxdiv.split('_')[-1])
+        assert (cell.dimension == 3)
+        if not getattr(mf, '_ws_exx', None):
+            mf._ws_exx = precompute_exx(cell, kpts)
+        exx_alpha = mf._ws_exx['alpha']
+        exx_kcell = mf._ws_exx['kcell']
+        exx_q = mf._ws_exx['q']
+        exx_vq = mf._ws_exx['vq']
+
+        with np.errstate(divide='ignore',invalid='ignore'):
+            coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
+        coulG[absG2==0] = np.pi / exx_alpha**2
+        # Index k+Gv into the precomputed vq and add on
+        gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
+        gxyz = gxyz.round(decimals=6).astype(int)
+        mesh = np.asarray(exx_kcell.mesh)
+        gxyz = (gxyz + mesh)%mesh
+        qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
+        #qidx = [np.linalg.norm(exx_q-kGi,axis=1).argmin() for kGi in kG]
+        maxqv = abs(exx_q).max(axis=0)
+        is_lt_maxqv = (abs(kG) <= maxqv).all(axis=1)
+        coulG = coulG.astype(exx_vq.dtype)
+        coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
+
+        zeroTemp = coulG[absG2==0]
+
+        with np.errstate(divide='ignore',invalid='ignore'):
+            coulG = (4*np.pi/absG2) * (1 - np.exp(-absG2*0.25/(w**2.))) + coulG * np.exp(-absG2*0.25/(w**2.))
+        coulG[absG2==0] = zeroTemp + np.pi / (w**2.)
+
+        if cell.dimension < 3:
+            raise NotImplementedError
+
     else:
         # Ewald probe charge method to get the leading term of the finite size
         # error in exchange integrals
