@@ -21,34 +21,15 @@ if __name__ == "__main__":
     parser.add_argument("--kmesh", type=int, nargs=3, default=[1, 1, 1])
     args = parser.parse_args()
 
-    #atom = '''
-    #H 0 0 0
-    #H 0.74 0 0
-    #'''
-    #a = numpy.asarray([
-    #    [8,0,0],
-    #    [0,8,0],
-    #    [0,0,8]],dtype=numpy.float64)
-
     atom = '''
-    B    0.0000000000    0.0000000000    0.0000000000
-    N    1.2504457494    0.7217977157    0.0000000000
+    C    0.0000000000    0.0000000000    0.0000000000
+    C    0.8917500000    0.8917500000    0.8917500000
     '''
     a = numpy.asarray([
-           [2.5008385811,    0.0000000000,    0.0000000000],
-           [1.2504192905,    2.1657897420,    0.0000000000],
-           [0.0000000000,    0.0000000000,    20]
+        [1.7835000000, 1.7835000000, 0.0000000000],
+        [0.0000000000, 1.7835000000, 1.7835000000],
+        [1.7835000000, 0.0000000000, 1.7835000000]
     ])
-
-    #atom = '''
-    #C    0.0000000000    0.0000000000    0.0000000000
-    #C    0.8917500000    0.8917500000    0.8917500000
-    #'''
-    #a = numpy.asarray([
-    #    [1.7835000000, 1.7835000000, 0.0000000000],
-    #    [0.0000000000, 1.7835000000, 1.7835000000],
-    #    [1.7835000000, 0.0000000000, 1.7835000000]
-    #])
 
 
     basis = f'./GTHbasis/minao_gth.dat'
@@ -66,40 +47,9 @@ if __name__ == "__main__":
     #cell.precision=1e-14
     cell.build()
     kpts = cell.make_kpts(kmesh, time_reversal_symmetry=False)
-
-
-    stc_w = 3.0
-    stc_tau = 3.0
-    stc_omega_axes = numpy.asarray(
-        [3.0, 3.0, 3.0],
-        dtype=float,
-    )
-    Cinv = numpy.diag(1.0 / stc_omega_axes**2)
-
-
-    kmf = pyscf.pbc.scf.KRHF(cell,kpts=kpts, exxdiv='an_stc_ws')
-    dfNow = df.FFTDF(cell, kpts=kpts)
-    dfNow.stc_w = stc_w
-    dfNow.stc_tau = stc_tau
-    dfNow.stc_Cinv = Cinv
-    kmf.with_df = dfNow
-
-    
-    chkfileName = './diamond_chk/diamond_%d_%s.chk' % (cell.ke_cutoff, kmesh_label)
-    try:
-        assert 1 == 0
-        cell, scf_res = scf.chkfile.load_scf(chkfileName)
-        cell.verbose = 0
-        for key,v in scf_res.items():
-            setattr(kmf, key, v)
-            kmf.kpts = kpts
-        kmf.converged = True
-    except BaseException:
-        print("========================")
-        print("sth is wrong, build from scratch")
-        print("========================")
-        kmf.chkfile = chkfileName
-        kmf.kernel()
+    kmf = pyscf.pbc.scf.KRHF(cell,kpts=kpts, exxdiv='stc_ws_3')
+    kmf.with_df = df.FFTDF(cell, kpts=kpts)
+    kmf.kernel()
     dm = kmf.make_rdm1()
     vj, vk = kmf.get_jk(dm_kpts=dm)
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk) / numpy.prod(numpy.array(kmesh))
