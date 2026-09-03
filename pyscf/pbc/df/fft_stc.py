@@ -27,6 +27,9 @@ from pyscf.pbc import tools
 from pyscf.pbc.df import fft_jk
 from pyscf.pbc.df.df_jk import _format_dms, _format_kpts_band, _format_jks
 from pyscf.pbc.lib.kpts_helper import is_zero
+import warnings
+import scipy.special
+from pyscf import __config__
 
 
 class FFTDF_STC(FFTDF):
@@ -266,13 +269,6 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     assert( exx.lower() in ['vcut_sph', 'vcut_ws'] )
     assert( omega_stc is not None )
 
-    # calculate vcut coulG without omega_stc
-    if omega is None:
-        coulG = tools.get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, None, **kwargs)
-    else:
-        assert 1 == 2
-        # the lr SPH/ lr WS has to be computed
-        coulG = get_truncated_lr_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, None, **kwargs)
 
     # smooth modification with omega_stc
     if mesh is None:
@@ -304,6 +300,17 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         kpts = k.reshape(1,3)
     Nk = len(kpts)
 
+    # calculate vcut coulG without omega_stc
+    if omega is None:
+        coulG = tools.get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, None, **kwargs)
+    else:
+        # the lr SPH/ lr WS has to be computed
+        if not getattr(mf, '_ws_lr_exx', None):
+            mf._ws_lr_exx = lr_precompute_exx(cell, kpts, exx, kG, absG2, omega)
+        coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega)
+
+
+
     f = np.exp(-absG2*0.25/(omega_stc)**2.)
 
     v0 = coulG[absG2==0]
@@ -320,10 +327,168 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
     return coulG
 
+def lr_precompute_exx(cell, kpts, exx, kG, absG2, omega, precision = None, nimgs = None):
 
-def get_truncated_lr_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, omega, **kwargs):
+    assert ( (exx.lower() == 'vcut_ws') )
+
+    from pyscf.pbc import gto as pbcgto
+    from pyscf.pbc.lo.base import get_kmesh
+
+    log = lib.logger.Logger(cell.stdout, cell.verbose)
+    log.debug('# Precomputing Wigner-Seitz EXX kernel')
+
+    cput0 = log.init_timer()
+
+    if kpts is None: kpts = np.zeros((1, 3))
+    kpts = np.reshape(kpts, (-1, 3))
+    kmesh = np.asarray(get_kmesh(cell, kpts), dtype=int)
+    scaled_kpts = cell.get_scaled_kpts(kpts - kpts[0])
+    scaled_kpts = np.rint(scaled_kpts * kmesh).astype(int) % kmesh
+    if len(np.unique(scaled_kpts, axis=0)) != len(kpts):
+        raise RuntimeError('Input k-points do not form a complete regular mesh')
+    log.debug('# kmesh = %s', kmesh)
+
+    if precision is None:
+        precision = min(cell.precision, 1e-11)
+    else:
+        precision = float(precision)
+    assert 0 < precision < 1
+
+    log.debug('# precision = %.15g', precision)
+
+    if nimgs is None:
+        nimgs = getattr(__config__, 'pbc_tools_pbc_vcut_ws_nimgs', [3, 3, 3])
+    nimgs = np.asarray(nimgs, dtype=int)
+    assert nimgs.shape == (3,)
+    assert np.all(nimgs > 0)
+
+    log.debug('# nimgs = %s', nimgs)
+
+    kcell = pbcgto.Cell()
+    kcell.atom = 'H 0. 0. 0.'
+    kcell.spin = 1
+    kcell.unit = 'B'
+    kcell.verbose = 0
+    kcell.a = np.einsum('xi,x->xi', cell.lattice_vectors(), kmesh)
+
+    alpha = omega
+
+    log_precision = -np.log(precision)
+    Gmax = 2 * alpha * np.sqrt(log_precision)
+    kcell.mesh = tools.cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
+    log.debug('# kcell.mesh FFT = %s', kcell.mesh)
+
+    rs = kcell.get_uniform_grids(wrap_around=False)
+    kngs = len(rs)
+    log.debug('# kcell kngs = %d', kngs)
+
+    images_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs
+    ])
+    images = np.dot(images_coord, kcell.a)
+    r = np.full(kngs, np.inf)
+    for image in images:
+        np.minimum(r, lib.norm(rs - image, axis=1), out=r)
+
+    # Determine an image search range guaranteed to be exhaustive.
+    Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
+    nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
+    log.debug('# nimgs_ref = %s', nimgs_ref)
+
+    images_ref_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs_ref
+    ])
+    r.fill(np.inf)
+    r_mic = np.empty_like(rs)
+    for image_coord in images_ref_coord:
+        image = np.dot(image_coord, kcell.a)
+        dr = rs - image
+        r1 = lib.norm(dr, axis=1)
+        mask = r1 < r
+        r[mask] = r1[mask]
+        r_mic[mask] = dr[mask]
+
+    vR = scipy.special.erf(alpha*r) / (r+1e-200)
+    vR[r<1e-9] = 2*alpha / np.sqrt(np.pi)
+    vG = (kcell.vol/kngs) * tools.fft(vR, kcell.mesh)
+    cache = {}
+
+    if abs(vG.imag).max() > 1e-6:
+        raise RuntimeError('Unconventional lattice was found')
+
+    ws_lr_exx = {
+            'kcell' : kcell,
+            'vq' : vG.real.copy(),
+            'vR' : vR,
+            'r_mic' : r_mic,
+            'vq_cache' : {}
+            }
+
+    return ws_lr_exx
+
+
+
+def get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega):
 
     assert( isinstance(omega, float) )
+
+    if exx.lower() == 'vcut_sph':
+        raise NotImplementedError
+
+    elif exx.lower() == 'vcut_ws':
+
+        kcell = mf._ws_lr_exx['kcell']
+        vq = mf._ws_lr_exx['vq']
+        vR = mf._ws_lr_exx['vR']
+        r_mic = mf._ws_lr_exx['r_mic']
+        cache = mf._ws_lr_exx['vq_cache']
+
+
+        with np.errstate(divide='ignore',invalid='ignore'):
+            coulG = 0.0 * 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*omega**2)))
+        coulG[absG2==0] = 0.0
+        
+        gxyz = np.dot(kG, kcell.lattice_vectors().T)/(2*np.pi)
+        shift = (gxyz[0] + .5) % 1 - .5
+        gxyz_int = np.rint(gxyz - shift).astype(int)
+        if abs(gxyz - gxyz_int - shift).max() > 1e-6:
+            raise RuntimeError('k+G vectors are incompatible with the FFT mesh')
+
+        no_shift = abs(shift).max() < 1e-9
+        if no_shift:
+            exx_vq = vq
+        else:
+            key = tuple(np.round(shift, 12))
+            if key not in cache:
+                ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
+                    The current implementation in `precompute_exx` selects only one of them
+                    deterministically. These boundary points have zero measure in the continuous
+                    integral, so their contribution vanishes as the FFT mesh is refined. Future
+                    implementation may want to collect all degenerate r_mic's and average their
+                    phases (i.e., similar to how Wannier interpolation handles boundary images).
+                '''
+                delta = np.dot(shift, kcell.reciprocal_vectors())
+                phase = np.exp(-1j * np.dot(r_mic, delta))
+                vG = (kcell.vol / len(phase)) * tools.fftk(
+                    vR, kcell.mesh, phase)
+                cache[key] = vG.real.copy()
+            exx_vq = cache[key]
+
+        mesh = np.asarray(kcell.mesh)
+        gxyz = (gxyz_int + mesh)%mesh
+        qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
+        lower = -(mesh // 2)
+        upper = (mesh - 1) // 2
+        is_lt_maxqv = ((gxyz_int >= lower) &
+                       (gxyz_int <= upper)).all(axis=1)
+        coulG = coulG.astype(exx_vq.dtype)
+        coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
+
+
+        return coulG
+        
+    else:
+        raise NotImplementedError
 
 
     
