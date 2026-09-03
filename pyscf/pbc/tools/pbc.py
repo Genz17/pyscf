@@ -388,69 +388,47 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             mf._ws_exx = precompute_exx(cell, kpts)
         exx_alpha = mf._ws_exx['alpha']
         exx_kcell = mf._ws_exx['kcell']
-        exx_q = mf._ws_exx['q']
-        exx_vq = mf._ws_exx['vq']
 
         with np.errstate(divide='ignore',invalid='ignore'):
             coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
         coulG[absG2==0] = np.pi / exx_alpha**2
         # Index k+Gv into the precomputed vq and add on
         gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
-        gxyz = gxyz.round(decimals=6).astype(int)
+        shift = (gxyz[0] + .5) % 1 - .5
+        gxyz_int = np.rint(gxyz - shift).astype(int)
+        if abs(gxyz - gxyz_int - shift).max() > 1e-6:
+            raise RuntimeError('k+G vectors are incompatible with the FFT mesh')
+
+        no_shift = abs(shift).max() < 1e-9
+        if no_shift:
+            exx_vq = mf._ws_exx['vq']
+        else:
+            key = tuple(np.round(shift, 12))
+            cache = mf._ws_exx['vq_cache']
+            if key not in cache:
+                ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
+                    The current implementation in `precompute_exx` selects only one of them
+                    deterministically. These boundary points have zero measure in the continuous
+                    integral, so their contribution vanishes as the FFT mesh is refined. Future
+                    implementation may want to collect all degenerate r_mic's and average their
+                    phases (i.e., similar to how Wannier interpolation handles boundary images).
+                '''
+                delta = np.dot(shift, exx_kcell.reciprocal_vectors())
+                phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
+                vG = (exx_kcell.vol / len(phase)) * fftk(
+                    mf._ws_exx['vR'], exx_kcell.mesh, phase)
+                cache[key] = vG.real.copy()
+            exx_vq = cache[key]
+
         mesh = np.asarray(exx_kcell.mesh)
-        gxyz = (gxyz + mesh)%mesh
+        gxyz = (gxyz_int + mesh)%mesh
         qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
-        #qidx = [np.linalg.norm(exx_q-kGi,axis=1).argmin() for kGi in kG]
-        maxqv = abs(exx_q).max(axis=0)
-        is_lt_maxqv = (abs(kG) <= maxqv).all(axis=1)
+        lower = -(mesh // 2)
+        upper = (mesh - 1) // 2
+        is_lt_maxqv = ((gxyz_int >= lower) &
+                       (gxyz_int <= upper)).all(axis=1)
         coulG = coulG.astype(exx_vq.dtype)
         coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
-
-        if cell.dimension < 3:
-            raise NotImplementedError
-
-    elif isinstance(exxdiv, str) and exxdiv.startswith('stc_sph'):
-        w = float(exxdiv.split('_')[-1])
-        Rc = (3*Nk*cell.vol/(4*np.pi))**(1./3)
-        if w < 0:
-            w = abs(w) / Rc
-        with np.errstate(divide='ignore',invalid='ignore'):
-            coulG = (4*np.pi/absG2)*(1.0 - np.cos(np.sqrt(absG2)*Rc) * np.exp(-absG2*0.25/(w**2.)))
-        coulG[absG2==0] = 4*np.pi*(0.5*Rc**2 + 0.25/w**2.)
-
-        if cell.dimension < 3:
-            raise NotImplementedError
-
-    elif isinstance(exxdiv, str) and exxdiv.startswith('stc_ws'):
-        w = float(exxdiv.split('_')[-1])
-        assert (cell.dimension == 3)
-        if not getattr(mf, '_ws_exx', None):
-            mf._ws_exx = precompute_exx(cell, kpts)
-        exx_alpha = mf._ws_exx['alpha']
-        exx_kcell = mf._ws_exx['kcell']
-        exx_q = mf._ws_exx['q']
-        exx_vq = mf._ws_exx['vq']
-
-        with np.errstate(divide='ignore',invalid='ignore'):
-            coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
-        coulG[absG2==0] = np.pi / exx_alpha**2
-        # Index k+Gv into the precomputed vq and add on
-        gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
-        gxyz = gxyz.round(decimals=6).astype(int)
-        mesh = np.asarray(exx_kcell.mesh)
-        gxyz = (gxyz + mesh)%mesh
-        qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
-        #qidx = [np.linalg.norm(exx_q-kGi,axis=1).argmin() for kGi in kG]
-        maxqv = abs(exx_q).max(axis=0)
-        is_lt_maxqv = (abs(kG) <= maxqv).all(axis=1)
-        coulG = coulG.astype(exx_vq.dtype)
-        coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
-
-        zeroTemp = coulG[absG2==0]
-
-        with np.errstate(divide='ignore',invalid='ignore'):
-            coulG = (4*np.pi/absG2) * (1 - np.exp(-absG2*0.25/(w**2.))) + coulG * np.exp(-absG2*0.25/(w**2.))
-        coulG[absG2==0] = zeroTemp + np.pi / (w**2.)
 
         if cell.dimension < 3:
             raise NotImplementedError
@@ -532,7 +510,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             coulG[G0_idx] += Nk*cell.vol*madelung(cell, kpts, omega=0)
     return coulG
 
-def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=None):
+
+def precompute_exx(cell, kpts=None, precision=None, nimgs=None):
     '''Precompute the Wigner-Seitz truncated EXX kernel.
 
     The long-range part of the kernel is constructed with the minimum-image
@@ -548,15 +527,12 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
             Accuracy threshold used to set the range-separation parameter ``alpha``.
             Defaults to ``min(cell.precision, 1e-11)``, where the default value
             1e-11 follows the PRB paper above.
-        precision_fft : float
-            Accuracy threshold used to set the FFT mesh for the numerical
-            long-range kernel. Defaults to ``__config__.pbc_tools_pbc_vcut_ws_precision_fft``
-            if set, and to ``precision`` otherwise. Smaller values produce denser FFT
-            meshes without changing ``alpha``.
         nimgs : (3,) array_like of int
-            Number of lattice images searched in each direction on both sides
-            of the Born-von Karman cell. Defaults to [3,3,3], which can be overwritten
-            by setting the `__config__` attribute "pbc_tools_pbc_vcut_ws_nimgs".
+            Initial number of lattice images searched in each direction on
+            both sides of the Born-von Karman cell. The search range is
+            automatically enlarged when needed. Defaults to [3,3,3], which
+            can be overwritten by setting the `__config__` attribute
+            "pbc_tools_pbc_vcut_ws_nimgs".
 
     Returns:
         dict
@@ -568,6 +544,8 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
 
     log = lib.logger.Logger(cell.stdout, cell.verbose)
     log.debug('# Precomputing Wigner-Seitz EXX kernel')
+
+    cput0 = log.init_timer()
 
     if kpts is None: kpts = np.zeros((1, 3))
     kpts = np.reshape(kpts, (-1, 3))
@@ -584,18 +562,15 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
         precision = float(precision)
     assert 0 < precision < 1
 
-    if precision_fft is None:
-        precision_fft = getattr(__config__, 'pbc_tools_pbc_vcut_ws_precision_fft', None)
-        if precision_fft is None:
-            precision_fft = precision
-    precision_fft = float(precision_fft)
-    assert 0 < precision_fft < 1
+    log.debug('# precision = %.15g', precision)
 
     if nimgs is None:
         nimgs = getattr(__config__, 'pbc_tools_pbc_vcut_ws_nimgs', [3, 3, 3])
     nimgs = np.asarray(nimgs, dtype=int)
     assert nimgs.shape == (3,)
     assert np.all(nimgs > 0)
+
+    log.debug('# nimgs = %s', nimgs)
 
     kcell = pbcgto.Cell()
     kcell.atom = 'H 0. 0. 0.'
@@ -609,10 +584,9 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
 
     log_precision = -np.log(precision)
     alpha = np.sqrt(log_precision) / Rin
-    log.info('WS alpha = %s', alpha)
+    log.debug('# WS alpha = %s', alpha)
 
-    log_precision_fft = -np.log(precision_fft)
-    Gmax = 2 * alpha * np.sqrt(log_precision_fft)
+    Gmax = 2 * alpha * np.sqrt(log_precision)
     kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
     log.debug('# kcell.mesh FFT = %s', kcell.mesh)
 
@@ -628,23 +602,23 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
     for image in images:
         np.minimum(r, lib.norm(rs - image, axis=1), out=r)
 
-    # Check the image search against a range guaranteed to be exhaustive.
+    # Determine an image search range guaranteed to be exhaustive.
     Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
     nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
-    nimgs_ref = np.maximum(nimgs, nimgs_ref)
+    log.debug('# nimgs_ref = %s', nimgs_ref)
+
     images_ref_coord = lib.cartesian_prod([
         range(-n, n + 1) for n in nimgs_ref
     ])
-    r_ref = r.copy()
+    r.fill(np.inf)
+    r_mic = np.empty_like(rs)
     for image_coord in images_ref_coord:
-        if np.all(abs(image_coord) <= nimgs):
-            continue
         image = np.dot(image_coord, kcell.a)
-        np.minimum(r_ref, lib.norm(rs - image, axis=1), out=r_ref)
-    if np.max(r - r_ref) > 1e-10:
-        raise RuntimeError(
-            f'nimgs={nimgs} is not large enough for the minimum image '
-            f'convention; a sufficient value is {nimgs_ref}')
+        dr = rs - image
+        r1 = lib.norm(dr, axis=1)
+        mask = r1 < r
+        r[mask] = r1[mask]
+        r_mic[mask] = dr[mask]
 
     vR = scipy.special.erf(alpha*r) / (r+1e-200)
     vR[r<1e-9] = 2*alpha / np.sqrt(np.pi)
@@ -656,8 +630,14 @@ def precompute_exx(cell, kpts=None, precision=None, precision_fft=None, nimgs=No
     ws_exx = {'alpha': alpha,
               'kcell': kcell,
               'q'    : kcell.Gv,
-              'vq'   : vG.real.copy()}
+              'vq'   : vG.real.copy(),
+              'vR'   : vR,
+              'r_mic': r_mic,
+              'vq_cache': {}}
     log.debug('# Finished precomputing')
+
+    log.timer('Wigner-Seitz EXX precomputing', *cput0)
+
     return ws_exx
 
 
