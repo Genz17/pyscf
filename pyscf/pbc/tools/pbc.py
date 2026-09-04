@@ -385,7 +385,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     elif exxdiv == 'vcut_ws':  # PRB 87, 165122
         assert (cell.dimension == 3)
 
-        if _omega is None or _omega < 1e-9:
+        if _omega < 1e-9:
             if not getattr(mf, '_ws_exx', None):
                 mf._ws_exx = precompute_exx(cell, kpts)
             exx_alpha = mf._ws_exx['alpha']
@@ -703,6 +703,7 @@ def precompute_lr_exx(cell, kpts=None, precision=None, nimgs=None, omega = None,
 
     '''
         Precompute the Wigner-Seitz truncated LR EXX kernel.
+        the omega here inherites the cell.omega thus should be defined.
     '''
 
 

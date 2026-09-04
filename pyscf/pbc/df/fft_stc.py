@@ -302,26 +302,32 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         kpts = k.reshape(1,3)
     Nk = len(kpts)
 
-    # calculate vcut coulG without omega_stc
     if omega is None:
+        _omega = cell.omega
+    else:
+        _omega = omega
+
+    # calculate vcut coulG without omega_stc
+    if abs(_omega) < 1e-10:
         coulG = tools.get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, None, **kwargs)
     else:
         # the lr SPH/ lr WS has to be computed
+        assert ( (_omega > 0) )
         if not getattr(mf, '_ws_lr_exx', None):
-            mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = omega, omega_stc = omega_stc)
-        coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega)
+            mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
+        coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, _omega)
 
     f = np.exp(-absG2*0.25/(omega_stc)**2.)
 
     v0 = coulG[absG2==0]
     coulG *= f
 
-    if omega is None:
+    if abs(_omega) < 1e-10:
         with np.errstate(divide='ignore',invalid='ignore'):
             coulG += 4*np.pi/absG2 * (1. - f)
     else:
         with np.errstate(divide='ignore',invalid='ignore'):
-            coulG += 4*np.pi*(np.exp(-absG2*0.25/(omega)**2.))/absG2 * (1. - f)
+            coulG += 4*np.pi*(np.exp(-absG2*0.25/(_omega)**2.))/absG2 * (1. - f)
 
     coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
 
