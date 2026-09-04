@@ -385,53 +385,98 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     elif exxdiv == 'vcut_ws':  # PRB 87, 165122
         assert (cell.dimension == 3)
         if not getattr(mf, '_ws_exx', None):
-            mf._ws_exx = precompute_exx(cell, kpts)
+            mf._ws_exx = precompute_exx(cell, kpts, omega = _omega)
         exx_alpha = mf._ws_exx['alpha']
         exx_kcell = mf._ws_exx['kcell']
 
-        with np.errstate(divide='ignore',invalid='ignore'):
-            coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
-        coulG[absG2==0] = np.pi / exx_alpha**2
-        # Index k+Gv into the precomputed vq and add on
-        gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
-        shift = (gxyz[0] + .5) % 1 - .5
-        gxyz_int = np.rint(gxyz - shift).astype(int)
-        if abs(gxyz - gxyz_int - shift).max() > 1e-6:
-            raise RuntimeError('k+G vectors are incompatible with the FFT mesh')
+        if _omega is None or abs(_omega) < 1e-9:
+            with np.errstate(divide='ignore',invalid='ignore'):
+                coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
+            coulG[absG2==0] = np.pi / exx_alpha**2
+            # Index k+Gv into the precomputed vq and add on
+            gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
+            shift = (gxyz[0] + .5) % 1 - .5
+            gxyz_int = np.rint(gxyz - shift).astype(int)
+            if abs(gxyz - gxyz_int - shift).max() > 1e-6:
+                raise RuntimeError('k+G vectors are incompatible with the FFT mesh')
 
-        no_shift = abs(shift).max() < 1e-9
-        if no_shift:
-            exx_vq = mf._ws_exx['vq']
+            no_shift = abs(shift).max() < 1e-9
+            if no_shift:
+                exx_vq = mf._ws_exx['vq']
+            else:
+                key = tuple(np.round(shift, 12))
+                cache = mf._ws_exx['vq_cache']
+                if key not in cache:
+                    ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
+                        The current implementation in `precompute_exx` selects only one of them
+                        deterministically. These boundary points have zero measure in the continuous
+                        integral, so their contribution vanishes as the FFT mesh is refined. Future
+                        implementation may want to collect all degenerate r_mic's and average their
+                        phases (i.e., similar to how Wannier interpolation handles boundary images).
+                    '''
+                    delta = np.dot(shift, exx_kcell.reciprocal_vectors())
+                    phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
+                    vG = (exx_kcell.vol / len(phase)) * fftk(
+                        mf._ws_exx['vR'], exx_kcell.mesh, phase)
+                    cache[key] = vG.real.copy()
+                exx_vq = cache[key]
+
+            mesh = np.asarray(exx_kcell.mesh)
+            gxyz = (gxyz_int + mesh)%mesh
+            qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
+            lower = -(mesh // 2)
+            upper = (mesh - 1) // 2
+            is_lt_maxqv = ((gxyz_int >= lower) &
+                           (gxyz_int <= upper)).all(axis=1)
+            coulG = coulG.astype(exx_vq.dtype)
+            coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
+
+            if cell.dimension < 3:
+                raise NotImplementedError
         else:
-            key = tuple(np.round(shift, 12))
-            cache = mf._ws_exx['vq_cache']
-            if key not in cache:
-                ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
-                    The current implementation in `precompute_exx` selects only one of them
-                    deterministically. These boundary points have zero measure in the continuous
-                    integral, so their contribution vanishes as the FFT mesh is refined. Future
-                    implementation may want to collect all degenerate r_mic's and average their
-                    phases (i.e., similar to how Wannier interpolation handles boundary images).
-                '''
-                delta = np.dot(shift, exx_kcell.reciprocal_vectors())
-                phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
-                vG = (exx_kcell.vol / len(phase)) * fftk(
-                    mf._ws_exx['vR'], exx_kcell.mesh, phase)
-                cache[key] = vG.real.copy()
-            exx_vq = cache[key]
+            with np.errstate(divide='ignore',invalid='ignore'):
+                coulG = 0.0*4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
+            coulG[absG2==0] = 0.0
+            # Index k+Gv into the precomputed vq and add on
+            gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
+            shift = (gxyz[0] + .5) % 1 - .5
+            gxyz_int = np.rint(gxyz - shift).astype(int)
+            if abs(gxyz - gxyz_int - shift).max() > 1e-6:
+                raise RuntimeError('k+G vectors are incompatible with the FFT mesh')
 
-        mesh = np.asarray(exx_kcell.mesh)
-        gxyz = (gxyz_int + mesh)%mesh
-        qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
-        lower = -(mesh // 2)
-        upper = (mesh - 1) // 2
-        is_lt_maxqv = ((gxyz_int >= lower) &
-                       (gxyz_int <= upper)).all(axis=1)
-        coulG = coulG.astype(exx_vq.dtype)
-        coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
+            no_shift = abs(shift).max() < 1e-9
+            if no_shift:
+                exx_vq = mf._ws_exx['vq']
+            else:
+                key = tuple(np.round(shift, 12))
+                cache = mf._ws_exx['vq_cache']
+                if key not in cache:
+                    ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
+                        The current implementation in `precompute_exx` selects only one of them
+                        deterministically. These boundary points have zero measure in the continuous
+                        integral, so their contribution vanishes as the FFT mesh is refined. Future
+                        implementation may want to collect all degenerate r_mic's and average their
+                        phases (i.e., similar to how Wannier interpolation handles boundary images).
+                    '''
+                    delta = np.dot(shift, exx_kcell.reciprocal_vectors())
+                    phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
+                    vG = (exx_kcell.vol / len(phase)) * fftk(
+                        mf._ws_exx['vR'], exx_kcell.mesh, phase)
+                    cache[key] = vG.real.copy()
+                exx_vq = cache[key]
 
-        if cell.dimension < 3:
-            raise NotImplementedError
+            mesh = np.asarray(exx_kcell.mesh)
+            gxyz = (gxyz_int + mesh)%mesh
+            qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
+            lower = -(mesh // 2)
+            upper = (mesh - 1) // 2
+            is_lt_maxqv = ((gxyz_int >= lower) &
+                           (gxyz_int <= upper)).all(axis=1)
+            coulG = coulG.astype(exx_vq.dtype)
+            coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
+
+            if cell.dimension < 3:
+                raise NotImplementedError
 
     else:
         # Ewald probe charge method to get the leading term of the finite size
@@ -488,7 +533,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     if _omega != 0 and cell.dimension != 3:
         logger.warn(cell, 'The coulG kernel for range-separated Coulomb potential '
                     f'for PBC {cell.dimension} is inaccurate.')
-    if _omega > 0:
+    if _omega > 0 and exxdiv != 'vcut_ws':
+        # the non ws vcut should be treated later
         # long range part
         coulG *= np.exp(-.25/_omega**2 * absG2)
     elif _omega < 0:
@@ -511,7 +557,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     return coulG
 
 
-def precompute_exx(cell, kpts=None, precision=None, nimgs=None):
+def precompute_exx(cell, kpts=None, precision=None, nimgs=None, omega = None):
+
     '''Precompute the Wigner-Seitz truncated EXX kernel.
 
     The long-range part of the kernel is constructed with the minimum-image
@@ -583,7 +630,11 @@ def precompute_exx(cell, kpts=None, precision=None, nimgs=None):
     log.debug('# Rin = %s', Rin)
 
     log_precision = -np.log(precision)
-    alpha = np.sqrt(log_precision) / Rin
+    if omega is None or abs(omega) < 1e-9: 
+        alpha = np.sqrt(log_precision) / Rin
+    else:
+        alpha = omega
+
     log.debug('# WS alpha = %s', alpha)
 
     Gmax = 2 * alpha * np.sqrt(log_precision)

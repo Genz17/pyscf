@@ -306,7 +306,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     else:
         # the lr SPH/ lr WS has to be computed
         if not getattr(mf, '_ws_lr_exx', None):
-            mf._ws_lr_exx = lr_precompute_exx(cell, kpts, exx, kG, absG2, omega)
+            mf._ws_lr_exx = tools.precompute_exx(cell, kpts, omega = omega)
         coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega)
 
 
@@ -326,106 +326,6 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
 
     return coulG
-
-def lr_precompute_exx(cell, kpts, exx, kG, absG2, omega, precision = None, nimgs = None):
-
-    assert ( (exx.lower() == 'vcut_ws') )
-
-    from pyscf.pbc import gto as pbcgto
-    from pyscf.pbc.lo.base import get_kmesh
-
-    log = lib.logger.Logger(cell.stdout, cell.verbose)
-    log.debug('# Precomputing Wigner-Seitz EXX kernel')
-
-    cput0 = log.init_timer()
-
-    if kpts is None: kpts = np.zeros((1, 3))
-    kpts = np.reshape(kpts, (-1, 3))
-    kmesh = np.asarray(get_kmesh(cell, kpts), dtype=int)
-    scaled_kpts = cell.get_scaled_kpts(kpts - kpts[0])
-    scaled_kpts = np.rint(scaled_kpts * kmesh).astype(int) % kmesh
-    if len(np.unique(scaled_kpts, axis=0)) != len(kpts):
-        raise RuntimeError('Input k-points do not form a complete regular mesh')
-    log.debug('# kmesh = %s', kmesh)
-
-    if precision is None:
-        precision = min(cell.precision, 1e-11)
-    else:
-        precision = float(precision)
-    assert 0 < precision < 1
-
-    log.debug('# precision = %.15g', precision)
-
-    if nimgs is None:
-        nimgs = getattr(__config__, 'pbc_tools_pbc_vcut_ws_nimgs', [3, 3, 3])
-    nimgs = np.asarray(nimgs, dtype=int)
-    assert nimgs.shape == (3,)
-    assert np.all(nimgs > 0)
-
-    log.debug('# nimgs = %s', nimgs)
-
-    kcell = pbcgto.Cell()
-    kcell.atom = 'H 0. 0. 0.'
-    kcell.spin = 1
-    kcell.unit = 'B'
-    kcell.verbose = 0
-    kcell.a = np.einsum('xi,x->xi', cell.lattice_vectors(), kmesh)
-
-    alpha = omega
-
-    log_precision = -np.log(precision)
-    Gmax = 2 * alpha * np.sqrt(log_precision)
-    kcell.mesh = tools.cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
-    log.debug('# kcell.mesh FFT = %s', kcell.mesh)
-
-    rs = kcell.get_uniform_grids(wrap_around=False)
-    kngs = len(rs)
-    log.debug('# kcell kngs = %d', kngs)
-
-    images_coord = lib.cartesian_prod([
-        range(-n, n + 1) for n in nimgs
-    ])
-    images = np.dot(images_coord, kcell.a)
-    r = np.full(kngs, np.inf)
-    for image in images:
-        np.minimum(r, lib.norm(rs - image, axis=1), out=r)
-
-    # Determine an image search range guaranteed to be exhaustive.
-    Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
-    nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
-    log.debug('# nimgs_ref = %s', nimgs_ref)
-
-    images_ref_coord = lib.cartesian_prod([
-        range(-n, n + 1) for n in nimgs_ref
-    ])
-    r.fill(np.inf)
-    r_mic = np.empty_like(rs)
-    for image_coord in images_ref_coord:
-        image = np.dot(image_coord, kcell.a)
-        dr = rs - image
-        r1 = lib.norm(dr, axis=1)
-        mask = r1 < r
-        r[mask] = r1[mask]
-        r_mic[mask] = dr[mask]
-
-    vR = scipy.special.erf(alpha*r) / (r+1e-200)
-    vR[r<1e-9] = 2*alpha / np.sqrt(np.pi)
-    vG = (kcell.vol/kngs) * tools.fft(vR, kcell.mesh)
-    cache = {}
-
-    if abs(vG.imag).max() > 1e-6:
-        raise RuntimeError('Unconventional lattice was found')
-
-    ws_lr_exx = {
-            'kcell' : kcell,
-            'vq' : vG.real.copy(),
-            'vR' : vR,
-            'r_mic' : r_mic,
-            'vq_cache' : {}
-            }
-
-    return ws_lr_exx
-
 
 
 def get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega):
