@@ -309,12 +309,17 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
     # calculate vcut coulG without omega_stc
     if abs(_omega) < 1e-10:
-        coulG = tools.get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, None, **kwargs)
+        coulG = tools.get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, 0.0, **kwargs)
     else:
         # the lr SPH/ lr WS has to be computed
         assert ( (_omega > 0) )
         if not getattr(mf, '_ws_lr_exx', None):
             mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
+
+        # rebuild if a new omega is specified.
+        if abs(mf._ws_lr_exx['alpha'] - omega) > 1e-9:
+            mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
+
         coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, _omega)
 
     f = np.exp(-absG2*0.25/(omega_stc)**2.)
@@ -343,7 +348,6 @@ def get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega):
 
     elif exx.lower() == 'vcut_ws':
 
-        assert ( (mf._ws_lr_exx['alpha'] == omega) )
 
         kcell = mf._ws_lr_exx['kcell']
         vq = mf._ws_lr_exx['vq']

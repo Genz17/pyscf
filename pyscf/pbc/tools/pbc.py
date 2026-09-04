@@ -436,11 +436,14 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
                 raise NotImplementedError
         elif _omega >= 1e-9:
             # to compute LR WS truncation coulG
-            if not getattr(mf, '_ws_exx', None):
-                mf._ws_exx = precompute_lr_exx(cell, kpts, omega = _omega)
+            if not getattr(mf, '_ws_lr_exx', None):
+                mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega)
 
-            exx_alpha = mf._ws_exx['alpha']
-            exx_kcell = mf._ws_exx['kcell']
+            if abs(_omega - mf._ws_lr_exx['alpha']) > 1e-9:
+                mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega)
+
+            exx_alpha = mf._ws_lr_exx['alpha']
+            exx_kcell = mf._ws_lr_exx['kcell']
 
             assert ( (abs(_omega - exx_alpha) < 1e-10) )
 
@@ -456,10 +459,10 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
             no_shift = abs(shift).max() < 1e-9
             if no_shift:
-                exx_vq = mf._ws_exx['vq']
+                exx_vq = mf._ws_lr_exx['vq']
             else:
                 key = tuple(np.round(shift, 12))
-                cache = mf._ws_exx['vq_cache']
+                cache = mf._ws_lr_exx['vq_cache']
                 if key not in cache:
                     ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
                         The current implementation in `precompute_exx` selects only one of them
@@ -469,9 +472,9 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
                         phases (i.e., similar to how Wannier interpolation handles boundary images).
                     '''
                     delta = np.dot(shift, exx_kcell.reciprocal_vectors())
-                    phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
+                    phase = np.exp(-1j * np.dot(mf._ws_lr_exx['r_mic'], delta))
                     vG = (exx_kcell.vol / len(phase)) * fftk(
-                        mf._ws_exx['vR'], exx_kcell.mesh, phase)
+                        mf._ws_lr_exx['vR'], exx_kcell.mesh, phase)
                     cache[key] = vG.real.copy()
                 exx_vq = cache[key]
 
