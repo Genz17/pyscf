@@ -317,7 +317,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
 
         # rebuild if a new omega is specified.
-        if abs(mf._ws_lr_exx['alpha'] - omega) > 1e-9:
+        if abs(mf._ws_lr_exx['alpha'] - _omega) > 1e-9:
             mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
 
         coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, _omega)

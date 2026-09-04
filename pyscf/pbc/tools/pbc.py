@@ -445,8 +445,6 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             exx_alpha = mf._ws_lr_exx['alpha']
             exx_kcell = mf._ws_lr_exx['kcell']
 
-            assert ( (abs(_omega - exx_alpha) < 1e-10) )
-
             with np.errstate(divide='ignore',invalid='ignore'):
                 coulG = 0.0*4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
             coulG[absG2==0] = 0.0

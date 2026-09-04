@@ -246,6 +246,10 @@ class FFTDF(lib.StreamObject):
             if isinstance(self._kpts, KPoints):
                 self._kpts.reset(cell)
             self.cell = cell
+
+            self.__dict__.pop('_ws_exx', None)
+            self.__dict__.pop('_ws_lr_exx', None)
+
         self._rsh_df = {}
         return self
 
