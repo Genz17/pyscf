@@ -306,10 +306,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     else:
         # the lr SPH/ lr WS has to be computed
         if not getattr(mf, '_ws_lr_exx', None):
-            mf._ws_lr_exx = tools.precompute_exx(cell, kpts, omega = omega)
+            mf._ws_lr_exx = tools.precompute_lr_exx(cell, kpts, omega = omega, omega_stc = omega_stc)
         coulG = get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega)
-
-
 
     f = np.exp(-absG2*0.25/(omega_stc)**2.)
 

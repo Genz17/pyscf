@@ -384,12 +384,13 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
     elif exxdiv == 'vcut_ws':  # PRB 87, 165122
         assert (cell.dimension == 3)
-        if not getattr(mf, '_ws_exx', None):
-            mf._ws_exx = precompute_exx(cell, kpts, omega = _omega)
-        exx_alpha = mf._ws_exx['alpha']
-        exx_kcell = mf._ws_exx['kcell']
 
         if _omega is None or abs(_omega) < 1e-9:
+            if not getattr(mf, '_ws_exx', None):
+                mf._ws_exx = precompute_exx(cell, kpts, omega = _omega)
+            exx_alpha = mf._ws_exx['alpha']
+            exx_kcell = mf._ws_exx['kcell']
+
             with np.errstate(divide='ignore',invalid='ignore'):
                 coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
             coulG[absG2==0] = np.pi / exx_alpha**2
@@ -434,6 +435,15 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             if cell.dimension < 3:
                 raise NotImplementedError
         else:
+            # to compute LR WS truncation coulG
+            if not getattr(mf, '_ws_exx', None):
+                mf._ws_exx = precompute_lr_exx(cell, kpts, omega = _omega)
+
+            exx_alpha = mf._ws_exx['alpha']
+            exx_kcell = mf._ws_exx['kcell']
+
+            assert ( (abs(_omega - exx_alpha) < 1e-10) )
+
             with np.errstate(divide='ignore',invalid='ignore'):
                 coulG = 0.0*4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
             coulG[absG2==0] = 0.0
@@ -556,9 +566,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             coulG[G0_idx] += Nk*cell.vol*madelung(cell, kpts, omega=0)
     return coulG
 
-
-def precompute_exx(cell, kpts=None, precision=None, nimgs=None, omega = None):
-
+def precompute_exx(cell, kpts=None, precision=None, nimgs=None):
     '''Precompute the Wigner-Seitz truncated EXX kernel.
 
     The long-range part of the kernel is constructed with the minimum-image
@@ -630,11 +638,7 @@ def precompute_exx(cell, kpts=None, precision=None, nimgs=None, omega = None):
     log.debug('# Rin = %s', Rin)
 
     log_precision = -np.log(precision)
-    if omega is None or abs(omega) < 1e-9: 
-        alpha = np.sqrt(log_precision) / Rin
-    else:
-        alpha = omega
-
+    alpha = np.sqrt(log_precision) / Rin
     log.debug('# WS alpha = %s', alpha)
 
     Gmax = 2 * alpha * np.sqrt(log_precision)
@@ -690,6 +694,122 @@ def precompute_exx(cell, kpts=None, precision=None, nimgs=None, omega = None):
     log.timer('Wigner-Seitz EXX precomputing', *cput0)
 
     return ws_exx
+
+
+def precompute_lr_exx(cell, kpts=None, precision=None, nimgs=None, omega = None, omega_stc = None):
+
+    '''
+        Precompute the Wigner-Seitz truncated LR EXX kernel.
+    '''
+
+
+    assert ( (isinstance(omega, float)) )
+    assert (  (omega > 1e-9) )
+
+    from pyscf.pbc import gto as pbcgto
+    from pyscf.pbc.lo.base import get_kmesh
+
+    log = lib.logger.Logger(cell.stdout, cell.verbose)
+    log.debug('# Precomputing Wigner-Seitz LR EXX kernel')
+
+    cput0 = log.init_timer()
+
+    if kpts is None: kpts = np.zeros((1, 3))
+    kpts = np.reshape(kpts, (-1, 3))
+    kmesh = np.asarray(get_kmesh(cell, kpts), dtype=int)
+    scaled_kpts = cell.get_scaled_kpts(kpts - kpts[0])
+    scaled_kpts = np.rint(scaled_kpts * kmesh).astype(int) % kmesh
+    if len(np.unique(scaled_kpts, axis=0)) != len(kpts):
+        raise RuntimeError('Input k-points do not form a complete regular mesh')
+    log.debug('# kmesh = %s', kmesh)
+
+    if precision is None:
+        precision = min(cell.precision, 1e-11)
+    else:
+        precision = float(precision)
+    assert 0 < precision < 1
+
+    log.debug('# precision = %.15g', precision)
+
+    if nimgs is None:
+        nimgs = getattr(__config__, 'pbc_tools_pbc_vcut_ws_nimgs', [3, 3, 3])
+    nimgs = np.asarray(nimgs, dtype=int)
+    assert nimgs.shape == (3,)
+    assert np.all(nimgs > 0)
+
+    log.debug('# nimgs = %s', nimgs)
+
+    kcell = pbcgto.Cell()
+    kcell.atom = 'H 0. 0. 0.'
+    kcell.spin = 1
+    kcell.unit = 'B'
+    kcell.verbose = 0
+    kcell.a = np.einsum('xi,x->xi', cell.lattice_vectors(), kmesh)
+
+    log_precision = -np.log(precision)
+    alpha = omega
+
+    log.debug('# WS alpha = %s', alpha)
+
+    if omega_stc is None:
+        Gmax = 2 * alpha * np.sqrt(log_precision) # this could be insufficient
+    else:
+        assert ( (isinstance(omega_stc, float)) )
+        assert (  (omega > 1e-9) )
+        Gmax = 2 * max(omega, omega_stc) * np.sqrt(log_precision) # this should be sufficient
+
+    kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
+    log.debug('# kcell.mesh FFT = %s', kcell.mesh)
+
+    rs = kcell.get_uniform_grids(wrap_around=False)
+    kngs = len(rs)
+    log.debug('# kcell kngs = %d', kngs)
+
+    images_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs
+    ])
+    images = np.dot(images_coord, kcell.a)
+    r = np.full(kngs, np.inf)
+    for image in images:
+        np.minimum(r, lib.norm(rs - image, axis=1), out=r)
+
+    # Determine an image search range guaranteed to be exhaustive.
+    Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
+    nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
+    log.debug('# nimgs_ref = %s', nimgs_ref)
+
+    images_ref_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs_ref
+    ])
+    r.fill(np.inf)
+    r_mic = np.empty_like(rs)
+    for image_coord in images_ref_coord:
+        image = np.dot(image_coord, kcell.a)
+        dr = rs - image
+        r1 = lib.norm(dr, axis=1)
+        mask = r1 < r
+        r[mask] = r1[mask]
+        r_mic[mask] = dr[mask]
+
+    vR = scipy.special.erf(alpha*r) / (r+1e-200)
+    vR[r<1e-9] = 2*alpha / np.sqrt(np.pi)
+    vG = (kcell.vol/kngs) * fft(vR, kcell.mesh)
+
+    if abs(vG.imag).max() > 1e-6:
+        raise RuntimeError('Unconventional lattice was found')
+
+    ws_lr_exx = {'alpha': alpha,
+                'kcell': kcell,
+                'q'    : kcell.Gv,
+                'vq'   : vG.real.copy(),
+                'vR'   : vR,
+                'r_mic': r_mic,
+                'vq_cache': {}}
+    log.debug('# Finished precomputing')
+
+    log.timer('Wigner-Seitz EXX precomputing', *cput0)
+
+    return ws_lr_exx
 
 
 def get_ws_inradius(a, kmesh):
