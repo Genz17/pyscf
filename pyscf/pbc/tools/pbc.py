@@ -385,9 +385,9 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     elif exxdiv == 'vcut_ws':  # PRB 87, 165122
         assert (cell.dimension == 3)
 
-        if _omega is None or abs(_omega) < 1e-9:
+        if _omega is None or _omega < 1e-9:
             if not getattr(mf, '_ws_exx', None):
-                mf._ws_exx = precompute_exx(cell, kpts, omega = _omega)
+                mf._ws_exx = precompute_exx(cell, kpts)
             exx_alpha = mf._ws_exx['alpha']
             exx_kcell = mf._ws_exx['kcell']
 
@@ -434,7 +434,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
             if cell.dimension < 3:
                 raise NotImplementedError
-        else:
+        elif _omega >= 1e-9:
             # to compute LR WS truncation coulG
             if not getattr(mf, '_ws_exx', None):
                 mf._ws_exx = precompute_lr_exx(cell, kpts, omega = _omega)
@@ -487,6 +487,9 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
             if cell.dimension < 3:
                 raise NotImplementedError
+        else:
+            # for SR WS truncated kernel
+            raise NotImplementedError
 
     else:
         # Ewald probe charge method to get the leading term of the finite size

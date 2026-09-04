@@ -48,6 +48,9 @@ class FFTDF_STC(FFTDF):
 
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
                with_j=True, with_k=True, omega=None, exxdiv=None):
+        from pyscf.pbc.df.aft import _check_kpts
+        kpts, is_single_kpt = _check_kpts(self, kpts)
+
         if omega is not None:  # J/K for RSH functionals
             with self.range_coulomb(omega) as rsh_df:
                 vj, vk = rsh_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k = False,
@@ -56,12 +59,11 @@ class FFTDF_STC(FFTDF):
                     vk = get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv, omega = omega)
                 return vj, vk
 
-        from pyscf.pbc.df.aft import _check_kpts
-        kpts, is_single_kpt = _check_kpts(self, kpts)
         # if is_single_kpt:
         #     vj, vk = fft_jk.get_jk(self, dm, hermi, kpts[0], kpts_band,
         #                            with_j, with_k, exxdiv)
         # else:
+
         if True:
             vj = vk = None
             if with_k:
@@ -335,11 +337,14 @@ def get_truncated_lr_coulG(cell, mf, kpts, exx, kG, absG2, omega):
 
     elif exx.lower() == 'vcut_ws':
 
+        assert ( (mf._ws_lr_exx['alpha'] == omega) )
+
         kcell = mf._ws_lr_exx['kcell']
         vq = mf._ws_lr_exx['vq']
         vR = mf._ws_lr_exx['vR']
         r_mic = mf._ws_lr_exx['r_mic']
         cache = mf._ws_lr_exx['vq_cache']
+
 
 
         with np.errstate(divide='ignore',invalid='ignore'):
