@@ -21,13 +21,13 @@
 import numpy as np
 
 from .fft import FFTDF
+from .stc_helper import get_coulG
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.pbc import tools
 from pyscf.pbc.df import fft_jk
 from pyscf.pbc.df.df_jk import _format_dms, _format_kpts_band, _format_jks
 from pyscf.pbc.lib.kpts_helper import is_zero
-from stc_helper import get_coulG
 import warnings
 import scipy.special
 from pyscf import __config__

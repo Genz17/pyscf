@@ -22,10 +22,10 @@
 import numpy as np
 
 from .aft import AFTDF
+from .stc_helper import get_coulG
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.pbc import tools
-from stc_helper import get_coulG
 from pyscf.pbc.df import aft_jk, ft_ao
 from pyscf.pbc.tools import k2gamma
 from pyscf.pbc.lib.kpts_helper import (
@@ -87,9 +87,7 @@ class AFTDF_STC(AFTDF):
         '''Weighted regular Coulomb kernel'''
 
         if not isinstance(exx, str) or exx.lower() not in ('vcut_ws', 'vcut_sph'):
-            return super().weighted_coulG(
-                kpt, exx, mesh, mesh, omega=omega
-            )
+            return super().weighted_coulG(kpt, exx, mesh, omega=omega)
 
         cell = mydf.cell
         if mesh is None:
@@ -309,7 +307,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=np.zeros((1,3)), kpts_band=None,
             Gpq = None
         cpu1 = log.timer_debug1(f'get_k_kpts group {group_id}', *cpu1)
 
-    if is_zero(kpts) and not numpy.iscomplexobj(dm_kpts):
+    if is_zero(kpts) and not np.iscomplexobj(dm_kpts):
         vk_kpts = vkR
     else:
         vk_kpts = vkR + vkI * 1j
