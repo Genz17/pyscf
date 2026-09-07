@@ -30,7 +30,7 @@ if __name__ == "__main__":
     ])
 
 
-    basis = f'sto-3g'
+    basis = f'./GTHbasis/cc-pvdz.dat'
     pseudo = None
 
     kmesh = numpy.asarray(args.kmesh) # mesh in reciprocal space
@@ -47,10 +47,19 @@ if __name__ == "__main__":
     cell.build()
     kpts = cell.make_kpts(kmesh, time_reversal_symmetry=False)
 
-    kmf = pyscf.pbc.scf.KRKS(cell, kpts=kpts, exxdiv='ewald')
+    kmf = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='ewald')
     kmf.with_df = RSGDF(cell, kpts=kpts)
+    kmf.verbose = 4
     kmf.kernel()
+
     dm = kmf.make_rdm1()
+
+    kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
+    kmf_stc.with_df = AFTDF_STC(cell, kpts=kpts)
+    kmf_stc.with_df.omega_dot_Rc = args.odr
+    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by AFTDF_STC: ", exchange_energy)
 
     kmf_aft_ewald = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='ewald')
     kmf_aft_ewald.with_df = AFTDF(cell, kpts=kpts)
@@ -65,15 +74,6 @@ if __name__ == "__main__":
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by AFTDF_TC: ", exchange_energy)
-
-
-    kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
-    kmf_stc.with_df = AFTDF_STC(cell, kpts=kpts)
-    kmf_stc.with_df.omega_dot_Rc = args.odr
-    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
-
-    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))
-    print("Exchange Energy by AFTDF_STC: ", exchange_energy)
 
     print(numpy.linalg.norm(vk - vk_stc)/numpy.linalg.norm(vk))
     print(numpy.linalg.norm(vk_ws - vk_stc)/numpy.linalg.norm(vk_ws))

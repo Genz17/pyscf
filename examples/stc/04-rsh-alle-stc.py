@@ -5,8 +5,8 @@ import argparse
 import pyscf
 from pyscf import lib
 from pyscf.pbc import gto, scf, dft
-from pyscf.pbc.df.fft_stc import FFTDF_STC
-from pyscf.pbc.df.fft import FFTDF
+from pyscf.pbc.df.aft_stc import AFTDF_STC
+from pyscf.pbc.df.aft import AFTDF
 from pyscf.pbc.df.rsdf import RSGDF
 
 numpy.set_printoptions(threshold=numpy.inf, linewidth=numpy.inf)
@@ -14,7 +14,7 @@ numpy.set_printoptions(suppress=True, precision=8)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ke-cutoff", type=int, default=30)
+    parser.add_argument("--ke-cutoff", type=int, default=40)
     parser.add_argument("--kmesh", type=int, nargs=3, default=[1, 1, 1])
     parser.add_argument("--odr", type=float, default=4.)
     args = parser.parse_args()
@@ -29,8 +29,8 @@ if __name__ == "__main__":
         [1.7835000000, 0.0000000000, 1.7835000000]
     ])
 
-    basis = f'./GTHbasis/minao_gth.dat'
-    pseudo = 'gth-hf-rev'
+    basis = f'./GTHbasis/cc-pvdz.dat'
+    pseudo = None
 
     kmesh = numpy.asarray(args.kmesh) # mesh in reciprocal space
     kmesh_label = "_".join(str(k) for k in kmesh)
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     print("the odr is", args.odr)
     print("++++++++++++")
     cell = pyscf.pbc.gto.Cell(atom=atom, a=a, basis=basis, pseudo=pseudo)
-    cell.verbose = 0
+    cell.verbose = 4
     cell.ke_cutoff = args.ke_cutoff
     #cell.precision=1e-14
     cell.build()
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         exxdiv="vcut_ws",
     )
 
-    kmf_stc.with_df = FFTDF_STC(cell, kpts=kpts)
+    kmf_stc.with_df = AFTDF_STC(cell, kpts=kpts)
     kmf_stc.with_df.Rc_type = "ws"
     kmf_stc.with_df.omega_dot_Rc = args.odr
     energy = kmf_stc.kernel()
@@ -70,7 +70,7 @@ if __name__ == "__main__":
             exxdiv="vcut_ws",
         )
 
-        kmf_ws.with_df = FFTDF(cell, kpts=kpts)
+        kmf_ws.with_df = AFTDF(cell, kpts=kpts)
         energy = kmf_ws.kernel()
 
         print("WS Converged:", kmf_ws.converged)
@@ -84,11 +84,10 @@ if __name__ == "__main__":
             exxdiv="ewald",
         )
 
-        kmf_ewald.with_df = FFTDF(cell, kpts=kpts)
+        kmf_ewald.with_df = AFTDF(cell, kpts=kpts)
         energy = kmf_ewald.kernel()
 
         print("EWALD Converged:", kmf_ewald.converged)
         print("EWALD Total energy:", energy)
-
 
 
