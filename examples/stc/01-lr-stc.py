@@ -78,6 +78,13 @@ if __name__ == "__main__":
     print("Exchange Energy by FFTDF_TC: ", exchange_energy)
 
 
+    kmf_fft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
+    kmf_fft_ws.with_df = FFTDF(cell, kpts=kpts)
+    vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
+
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by FFTDF_TC: ", exchange_energy)
+
 
     print(numpy.linalg.norm(vk - vk_stc)/numpy.linalg.norm(vk))
     print(numpy.linalg.norm(vk_ws - vk_stc)/numpy.linalg.norm(vk_ws))

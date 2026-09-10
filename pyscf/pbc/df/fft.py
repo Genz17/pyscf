@@ -193,6 +193,8 @@ class FFTDF(lib.StreamObject):
         'cell', 'kpts', 'mesh', 'blockdim', 'exxdiv',
     }
 
+    omega_dot_Rc = 4.
+
     def __init__(self, cell, kpts=None):
         from pyscf.pbc.dft import numint
         self.cell = cell
