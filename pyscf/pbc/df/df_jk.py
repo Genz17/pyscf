@@ -283,7 +283,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
     cell = mydf.cell
     log = logger.Logger(mydf.stdout, mydf.verbose)
 
-    if exxdiv is not None and exxdiv != 'ewald':
+    if exxdiv is not None and exxdiv not in ('ewald', 'smooth_vcut_ws', 'smooth_vcut_sph'):
         log.warn('GDF does not support exxdiv %s. '
                  'exxdiv needs to be "ewald" or None', exxdiv)
         raise RuntimeError('GDF does not support exxdiv %s' % exxdiv)

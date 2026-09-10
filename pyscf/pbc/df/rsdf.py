@@ -56,7 +56,7 @@ from pyscf.pbc.df import rsdf_builder
 from pyscf.pbc.df import gdf_builder
 from pyscf.pbc.df.incore import Int3cBuilder
 from pyscf.df.outcore import _guess_shell_ranges
-from pyscf.pbc.tools import k2gamma
+from pyscf.pbc.tools import k2gamma, get_ws_inradius
 from pyscf.pbc.lib.kpts_helper import (is_zero, member, unique,
                                        members_with_wrap_around)
 from pyscf.df.addons import make_auxmol
@@ -80,6 +80,9 @@ class RSGDF(GDF):
         'omega', 'ke_cutoff', 'mesh_compact', 'omega_j2c', 'mesh_j2c',
         'precision_j2c', 'j2c_eig_always', 'kpts',
     }
+
+    omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
+    exxdiv = 'smooth_vcut_ws'
 
     def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh=None, omega=None):
         return aft.weighted_coulG(self, kpt, exx, mesh, omega)
@@ -114,7 +117,13 @@ cell.dimension=3 with large vacuum.""")
         # Note 2: 'ke_cutoff' is not an input option. Use 'mesh_compact' directly.
         self.npw_max = 350
         self._omega_min = 0.3
-        self.omega = None
+        if self.exxdiv == 'smooth_vcut_ws':
+            from pyscf.pbc.lo.base import get_kmesh
+            kmesh = get_kmesh(cell, kpts)
+            Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
+            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
+        else:
+            self.omega = None
         self.ke_cutoff = None
         self.mesh_compact = None
 
@@ -124,7 +133,10 @@ cell.dimension=3 with large vacuum.""")
         # to 'precision_j2c'.
         # The default ('omega_j2c' = 0.4 and 'precision_j2c' = 1e-14) is recommended.
         # Like for j3c, 'mesh_j2c' can be overwritten manually.
-        self.omega_j2c = 0.4
+        if self.exxdiv == 'smooth_vcut_ws':
+            self.omega_j2c = self.omega # this actually only affects the SR branch
+        else:
+            self.omega_j2c = 0.4
         self.mesh_j2c = None
         self.precision_j2c = 1e-14
 
