@@ -82,13 +82,12 @@ class RSGDF(GDF):
     }
 
     omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
-    exxdiv = 'ewald'
 
     def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh = None, omega_stc = None, omega=None):
         # this is actually not used at all
         return 
 
-    def __init__(self, cell, kpts=np.zeros((1,3))):
+    def __init__(self, cell, kpts=np.zeros((1,3)), exxdiv = 'ewald'):
         if cell.dimension < 3:
             raise NotImplementedError("""
 RSGDF for low-dimensional systems are not available yet. We recommend using
@@ -137,15 +136,17 @@ cell.dimension=3 with large vacuum.""")
         # first, and ED is called only if CD fails.
         self.j2c_eig_always = False
 
-        exxTEMP = self.exxdiv
-        GDF.__init__(self, cell, kpts=kpts)
-        self.exxdiv = exxTEMP
+        self.exxdiv = exxdiv
         if self.exxdiv == 'smooth_vcut_ws':
             from pyscf.pbc.lo.base import get_kmesh
             kmesh = get_kmesh(cell, kpts)
             Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
             self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
             self.omega_j2c = self.omega # this actually only affects the SR branch
+
+        exxTEMP = self.exxdiv
+        GDF.__init__(self, cell, kpts=kpts)
+        self.exxdiv = exxTEMP
 
         self.kpts = np.reshape(self.kpts, (-1,3))
 
@@ -697,4 +698,9 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
 
     def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh = None, omega=None, omega_stc = None):
         # this is actually not used at all
-        return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
+        if exx == 'smooth_vcut_ws':
+            return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
+        else:
+            exx = False
+            return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = True)
+    
