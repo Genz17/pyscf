@@ -256,7 +256,7 @@ def _Gv_wrap_around(cell, Gv, k, mesh):
     return kG
 
 def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
-              wrap_around=True, omega=None, omega_stc = None, **kwargs):
+              wrap_around=True, omega=None, omega_stc = None, withSR = True, **kwargs):
     '''Calculate the Coulomb kernel for all G-vectors, handling G=0 and exchange.
 
     Args:
@@ -553,14 +553,15 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
 
             f = np.exp(-absG2*0.25/(omega_stc)**2.)
-
-            v0 = coulG[absG2==0]
             coulG *= f
 
-            with np.errstate(divide='ignore',invalid='ignore'):
-                coulG += 4*np.pi/absG2 * (1. - f)
+            if withSR: # only for dealing with rsdf
 
-            coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
+                v0 = coulG[absG2==0]
+                with np.errstate(divide='ignore',invalid='ignore'):
+                    coulG += 4*np.pi/absG2 * (1. - f)
+
+                coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
 
 
             if cell.dimension < 3:

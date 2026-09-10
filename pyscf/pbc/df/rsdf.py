@@ -82,7 +82,7 @@ class RSGDF(GDF):
     }
 
     omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
-    exxdiv = 'smooth_vcut_ws'
+    exxdiv = 'ewald'
 
     def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh = None, omega_stc = None, omega=None):
         # this is actually not used at all
@@ -309,6 +309,7 @@ cell.dimension=3 with large vacuum.""")
         else:
             kpts_union = unique(np.vstack([self.kpts, self.kpts_band]))[0]
         dfbuilder = _RSGDFBuilder(cell, auxcell, kpts_union)
+        dfbuilder.exxdiv = self.exxdiv
         dfbuilder.omega_dot_Rc = self.omega_dot_Rc
         dfbuilder.__dict__.update(self.__dict__)
         dfbuilder.kpts = kpts_union
@@ -699,4 +700,4 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
 
     def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh = None, omega=None, omega_stc = None):
         # this is actually not used at all
-        return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc)
+        return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
