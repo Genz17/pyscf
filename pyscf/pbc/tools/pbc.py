@@ -569,10 +569,10 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             # to compute LR WS truncation coulG
 
             if not getattr(mf, '_ws_lr_exx', None):
-                mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega)
+                mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
 
             if abs(_omega - mf._ws_lr_exx['alpha']) > 1e-9:
-                mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega)
+                mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
 
             exx_alpha = mf._ws_lr_exx['alpha']
             exx_kcell = mf._ws_lr_exx['kcell']
@@ -692,7 +692,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     if _omega > 0 and exxdiv != 'vcut_ws':
         # the non ws vcut should be treated later
         # long range part
-        coulG *= np.exp(-.25/_omega**2 * absG2)
+        #coulG *= np.exp(-.25/_omega**2 * absG2)
+        pass
     elif _omega < 0:
         if exxdiv == 'vcut_sph' or exxdiv == 'vcut_ws':
             raise RuntimeError(f'SR Coulomb for exxdiv={exxdiv} is not available')

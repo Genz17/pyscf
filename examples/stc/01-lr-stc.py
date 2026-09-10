@@ -57,7 +57,9 @@ if __name__ == "__main__":
     kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
     kmf_stc.with_df = FFTDF_STC(cell, kpts=kpts)
     kmf_stc.with_df.omega_dot_Rc = args.odr
-    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
+
+    omega = 0.3
+    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by FFTDF_STC: ", exchange_energy)
@@ -65,14 +67,14 @@ if __name__ == "__main__":
 
     kmf_fft_ewald = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='ewald')
     kmf_fft_ewald.with_df = FFTDF(cell, kpts=kpts)
-    vj, vk = kmf_fft_ewald.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
+    vj, vk = kmf_fft_ewald.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by FFTDF_EWALD: ", exchange_energy)
 
     kmf_fft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
     kmf_fft_ws.with_df = FFTDF(cell, kpts=kpts)
-    vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
+    vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega) 
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by FFTDF_TC: ", exchange_energy)
@@ -80,7 +82,7 @@ if __name__ == "__main__":
 
     kmf_fft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
     kmf_fft_ws.with_df = FFTDF(cell, kpts=kpts)
-    vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = 0.2)
+    vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by FFTDF_TC: ", exchange_energy)
