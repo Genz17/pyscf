@@ -146,6 +146,7 @@ cell.dimension=3 with large vacuum.""")
         self.j2c_eig_always = False
 
         GDF.__init__(self, cell, kpts=kpts)
+        self.exxdiv = 'smooth_vcut_ws'
 
         self.kpts = np.reshape(self.kpts, (-1,3))
 
@@ -338,6 +339,7 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
         'omega', 'ke_cutoff', 'mesh_compact', 'omega_j2c', 'mesh_j2c',
         'precision_j2c', 'j2c_eig_always', 'kpts',
     }
+    omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
 
     def __init__(self, cell, auxcell, kpts=np.zeros((1,3))):
         self.eta = None
@@ -415,7 +417,7 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
                     qaux2 = np.outer(qaux,qaux)
                 j2c[k] -= qaux2 * g0_j2c
             # long-range part via aft
-            coulG_lr = self.weighted_coulG(kpt, mesh=mesh_j2c, omega=omega_j2c)
+            coulG_lr = self.weighted_coulG(kpt, mesh=mesh_j2c, omega=omega_j2c, exx = self.exxdiv)
             for p0, p1 in lib.prange(0, ngrids, blksize):
                 auxG = ft_ao.ft_ao(auxcell, Gv[p0:p1], None, b, gxyz[p0:p1], Gvbase, kpt).T
                 auxGR = np.asarray(auxG.real, order='C')
@@ -466,7 +468,7 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
         gxyz = lib.cartesian_prod([np.arange(len(x)) for x in Gvbase])
         shls_slice = (0, auxcell.nbas)
         auxG = ft_ao.ft_ao(auxcell, Gv, shls_slice, b, gxyz, Gvbase, kpt).T
-        wcoulG_lr = self.weighted_coulG(kpt, mesh=mesh, omega=self.omega)
+        wcoulG_lr = self.weighted_coulG(kpt, mesh=mesh, omega=self.omega, exx = self.exxdiv)
         auxG *= wcoulG_lr
         Gaux = lib.transpose(auxG)
         GauxR = np.asarray(Gaux.real, order='C')
@@ -531,9 +533,9 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
 
     def make_j3c(self, cderi_file, intor='int3c2e', aosym='s2', comp=None,
                  j_only=False, dataname='j3c', shls_slice=None, kptij_lst=None):
-        if self.cell.omega != 0:
-            raise RuntimeError('RSGDF cannot be used to evaluate the long-range '
-                               'HF exchange in RSH functionals.')
+        #if self.cell.omega != 0:
+        #    raise RuntimeError('RSGDF cannot be used to evaluate the long-range '
+        #                       'HF exchange in RSH functionals.')
 
         cpu1 = (logger.process_clock(), logger.perf_counter())
         log = logger.Logger(self.stdout, self.verbose)
