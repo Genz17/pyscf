@@ -256,7 +256,7 @@ def _Gv_wrap_around(cell, Gv, k, mesh):
     return kG
 
 def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
-              wrap_around=True, omega=None, **kwargs):
+              wrap_around=True, omega=None, omega_stc = None, **kwargs):
     '''Calculate the Coulomb kernel for all G-vectors, handling G=0 and exchange.
 
     Args:
@@ -496,11 +496,12 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
         assert (cell.dimension == 3)
 
-        from pyscf.pbc.lo.base import get_kmesh
-        kmesh = get_kmesh(cell, kpts)
-        #log.warn('Using kmesh= %s to calculate WS-inradius Rc', kmesh)
-        Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
-        omega_stc = mf.omega_dot_Rc / Rc
+        if omega_stc is None:
+            from pyscf.pbc.lo.base import get_kmesh
+            kmesh = get_kmesh(cell, kpts)
+            #log.warn('Using kmesh= %s to calculate WS-inradius Rc', kmesh)
+            Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
+            omega_stc = mf.omega_dot_Rc / Rc
 
         if abs(_omega) < 1e-9:
 
