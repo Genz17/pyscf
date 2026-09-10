@@ -7,6 +7,8 @@ from pyscf import lib
 from pyscf.pbc import gto, scf
 from pyscf.pbc.df.fft_stc import FFTDF_STC
 from pyscf.pbc.df.fft import FFTDF
+from pyscf.pbc.df.aft import AFTDF
+from pyscf.pbc.df.aft_stc import AFTDF_STC
 from pyscf.pbc.df.rsdf import RSGDF
 
 numpy.set_printoptions(threshold=numpy.inf, linewidth=numpy.inf)
@@ -87,6 +89,20 @@ if __name__ == "__main__":
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by FFTDF_TC: ", exchange_energy)
 
+    kmf_aft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
+    kmf_aft_ws.with_df = AFTDF_STC(cell, kpts=kpts)
+    vj_ws, vk_ws = kmf_aft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
-    print(numpy.linalg.norm(vk - vk_stc)/numpy.linalg.norm(vk))
-    print(numpy.linalg.norm(vk_ws - vk_stc)/numpy.linalg.norm(vk_ws))
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by AFTDF_TC: ", exchange_energy)
+
+    kmf_aft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
+    kmf_aft_ws.with_df = AFTDF(cell, kpts=kpts)
+    vj_ws, vk_ws = kmf_aft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
+
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by AFTDF_TC: ", exchange_energy)
+
+
+    #print(numpy.linalg.norm(vk - vk_stc)/numpy.linalg.norm(vk))
+    #print(numpy.linalg.norm(vk_ws - vk_stc)/numpy.linalg.norm(vk_ws))

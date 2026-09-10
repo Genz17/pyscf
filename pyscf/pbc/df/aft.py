@@ -593,6 +593,8 @@ class AFTDF(lib.StreamObject, AFTDFMixin):
     # to mimic molecular DF object
     blockdim = getattr(__config__, 'pbc_df_df_DF_blockdim', 240)
 
+    omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
+
     def __init__(self, cell, kpts=None):
         self.cell = cell
         self.stdout = cell.stdout

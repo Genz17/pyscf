@@ -689,11 +689,9 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     if _omega != 0 and cell.dimension != 3:
         logger.warn(cell, 'The coulG kernel for range-separated Coulomb potential '
                     f'for PBC {cell.dimension} is inaccurate.')
-    if _omega > 0 and exxdiv != 'vcut_ws':
-        # the non ws vcut should be treated later
-        # long range part
-        #coulG *= np.exp(-.25/_omega**2 * absG2)
-        pass
+    if _omega > 0 and exxdiv not in ('vcut_ws', 'smooth_vcut_ws', 'vcut_sph', 'smooth_vcut_sph'):
+        # note this is the correct LR kernel in reciprocal space
+        coulG *= np.exp(-.25/_omega**2 * absG2)
     elif _omega < 0:
         if exxdiv == 'vcut_sph' or exxdiv == 'vcut_ws':
             raise RuntimeError(f'SR Coulomb for exxdiv={exxdiv} is not available')
