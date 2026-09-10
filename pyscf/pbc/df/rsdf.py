@@ -701,6 +701,5 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
         if exx == 'smooth_vcut_ws':
             return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
         else:
-            exx = False
-            return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = True)
+            return aft.weighted_coulG(self, kpt, False, mesh, omega = omega_stc)
     

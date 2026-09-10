@@ -192,12 +192,14 @@ class RSGDF_STC(RSGDF):
 class _RSGDFBuilder_STC(_RSGDFBuilder):
     exxdiv = 'vcut_ws'
 
-    def weighted_coulG(self, kpt=np.zeros(3), exx=None, mesh=None, omega=None):
+    def weighted_coulG(self, kpt=np.zeros(3), exx=None, mesh=None, omega=None, omega_stc = None):
         '''Weighted regular Coulomb kernel'''
         from pyscf.pbc import tools as pbctools
         from pyscf.pbc.tools.pbc import _Gv_wrap_around
 
         if exx is None: exx = self.exxdiv
+        if omega_stc is not None:
+            omega = omega_stc
 
         cell = self.cell
         if mesh is None:
