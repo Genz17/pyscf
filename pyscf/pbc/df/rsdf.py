@@ -118,13 +118,7 @@ cell.dimension=3 with large vacuum.""")
         # Note 2: 'ke_cutoff' is not an input option. Use 'mesh_compact' directly.
         self.npw_max = 350
         self._omega_min = 0.3
-        if self.exxdiv == 'smooth_vcut_ws':
-            from pyscf.pbc.lo.base import get_kmesh
-            kmesh = get_kmesh(cell, kpts)
-            Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
-            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
-        else:
-            self.omega = None
+        self.omega = None
         self.ke_cutoff = None
         self.mesh_compact = None
 
@@ -134,10 +128,7 @@ cell.dimension=3 with large vacuum.""")
         # to 'precision_j2c'.
         # The default ('omega_j2c' = 0.4 and 'precision_j2c' = 1e-14) is recommended.
         # Like for j3c, 'mesh_j2c' can be overwritten manually.
-        if self.exxdiv == 'smooth_vcut_ws':
-            self.omega_j2c = self.omega # this actually only affects the SR branch
-        else:
-            self.omega_j2c = 0.4
+        self.omega_j2c = 0.4
         self.mesh_j2c = None
         self.precision_j2c = 1e-14
 
@@ -149,6 +140,12 @@ cell.dimension=3 with large vacuum.""")
         exxTEMP = self.exxdiv
         GDF.__init__(self, cell, kpts=kpts)
         self.exxdiv = exxTEMP
+        if self.exxdiv == 'smooth_vcut_ws':
+            from pyscf.pbc.lo.base import get_kmesh
+            kmesh = get_kmesh(cell, kpts)
+            Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
+            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
+            self.omega_j2c = self.omega # this actually only affects the SR branch
 
         self.kpts = np.reshape(self.kpts, (-1,3))
 
