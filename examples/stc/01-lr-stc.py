@@ -55,13 +55,13 @@ if __name__ == "__main__":
     kmf.kernel()
     dm = kmf.make_rdm1()
 
-    kmf = scf.KRHF(cell, kpts=kpts, exxdiv=None)
-    kmf = density_fit(kmf, exxdiv='vcut_ws', omega_dot_Rc=4)
-    kmf.verbose = 4
-    kmf.kernel()
-    dm_prime = kmf.make_rdm1()
+    #kmf = scf.KRHF(cell, kpts=kpts, exxdiv=None)
+    #kmf = density_fit(kmf, exxdiv='vcut_ws', omega_dot_Rc=4)
+    #kmf.verbose = 4
+    #kmf.kernel()
+    #dm_prime = kmf.make_rdm1()
 
-    print(numpy.linalg.norm(dm - dm_prime))
+    #print(numpy.linalg.norm(dm - dm_prime))
 
 
 
@@ -70,7 +70,7 @@ if __name__ == "__main__":
     kmf_stc.with_df = FFTDF_STC(cell, kpts=kpts)
     kmf_stc.with_df.omega_dot_Rc = args.odr
 
-    omega = 0.0
+    omega = 0.2
     vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))

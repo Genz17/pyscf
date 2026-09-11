@@ -158,9 +158,8 @@ cell.dimension=3 with large vacuum.""")
                with_j=True, with_k=True, omega=None, exxdiv=None):
 
         if omega is not None and omega != 0:  # J/K for RSH functionals
-            with self.range_coulomb(omega) as rsh_df:
-                return rsh_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
-                                     omega=None, exxdiv=exxdiv)
+            return GDF.get_jk(self, dm, hermi, kpts, kpts_band, with_j, with_k,
+                                 omega=omega, exxdiv=exxdiv) # folds back to aftdf
 
         from pyscf.pbc.df.aft import _check_kpts
         from pyscf.pbc.df import df_jk
