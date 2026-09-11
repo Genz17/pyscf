@@ -49,12 +49,21 @@ if __name__ == "__main__":
     cell.build()
     kpts = cell.make_kpts(kmesh, time_reversal_symmetry=False)
 
-    kmf = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='ewald')
-    kmf.with_df = RSGDF(cell, kpts=kpts)
+    kmf = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
+    kmf.with_df = RSGDF(cell, kpts=kpts, exxdiv = 'smooth_vcut_ws')
     kmf.verbose = 4
     kmf.kernel()
-
     dm = kmf.make_rdm1()
+
+    kmf = scf.KRHF(cell, kpts=kpts, exxdiv=None)
+    kmf = density_fit(kmf, exxdiv='vcut_ws', omega_dot_Rc=4)
+    kmf.verbose = 4
+    kmf.kernel()
+    dm_prime = kmf.make_rdm1()
+
+    print(numpy.linalg.norm(dm - dm_prime))
+
+
 
 
     kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')

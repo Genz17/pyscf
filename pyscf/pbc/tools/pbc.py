@@ -561,7 +561,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
                 with np.errstate(divide='ignore',invalid='ignore'):
                     coulG += 4*np.pi/absG2 * (1. - f)
 
-            coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
+            coulG[absG2==0] = v0 + np.pi/(omega_stc)**2. # For RSDF, the short range part is subtracted, added back here
 
 
             if cell.dimension < 3:

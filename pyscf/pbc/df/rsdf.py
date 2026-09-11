@@ -73,12 +73,14 @@ def get_aux_chg(auxcell):
 
 
 class RSGDF(GDF):
-    '''Range Separated Gaussian Density Fitting
+    '''
+    Range Separated Gaussian Density Fitting
+    J build / K build are two sets
     '''
     _keys = {
         'use_bvk', 'precision_R', 'precision_G', 'npw_max', '_omega_min',
         'omega', 'ke_cutoff', 'mesh_compact', 'omega_j2c', 'mesh_j2c',
-        'precision_j2c', 'j2c_eig_always', 'kpts',
+        'precision_j2c', 'j2c_eig_always', 'kpts', 'with_df_j'
     }
 
     omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
@@ -148,7 +150,51 @@ cell.dimension=3 with large vacuum.""")
         GDF.__init__(self, cell, kpts=kpts)
         self.exxdiv = exxTEMP
 
+        self.with_df_j = None
+
         self.kpts = np.reshape(self.kpts, (-1,3))
+
+    def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
+               with_j=True, with_k=True, omega=None, exxdiv=None):
+
+        if omega is not None and omega != 0:  # J/K for RSH functionals
+            with self.range_coulomb(omega) as rsh_df:
+                return rsh_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
+                                     omega=None, exxdiv=exxdiv)
+
+        from pyscf.pbc.df.aft import _check_kpts
+        from pyscf.pbc.df import df_jk
+
+        kpts, is_single_kpt = _check_kpts(self, kpts)
+
+        if self.with_df_j is None:
+            self.with_df_j = GDF(self.cell, self.kpts)
+
+        self.with_df_j.auxbasis = self.auxbasis
+        self.with_df_j.max_memory = self.max_memory
+        self.with_df_j.stdout = self.stdout
+        self.with_df_j.verbose = self.verbose
+
+        vk = vj = None
+        if with_k:
+            vk = df_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
+        if with_j:
+            vj = df_jk.get_j_kpts(self.with_df_j, dm, hermi, kpts, kpts_band)
+        
+        return vj, vk
+
+    def reset(self, cell=None):
+        if cell is not None:
+            if isinstance(self._kpts, KPoints):
+                self._kpts.reset(cell)
+            self.cell = cell
+        if self.with_df_j is not None:
+            self.with_df_j.reset(cell)
+        self.auxcell = None
+        self._cderi = None
+        self._rsh_df = {}
+        return self
+
 
     def dump_flags(self, verbose=None):
         cell = self.cell
@@ -222,7 +268,7 @@ cell.dimension=3 with large vacuum.""")
                                                 kmax=kmax,
                                                 round2odd=r2o)
             # if omega from npw_max is too small, use omega_min
-            if self.omega < self._omega_min:
+            if self.omega < self._omega_min and self.exxdiv == 'ewald':
                 self.omega = self._omega_min
                 self.ke_cutoff, mesh_compact = \
                                     rsdf_helper.estimate_mesh_for_omega(
@@ -700,6 +746,8 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
         # this is actually not used at all
         if exx == 'smooth_vcut_ws':
             return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
+        elif exx == 'smooth_vcut_sph':
+            raise NotImplementedError
         else:
             return aft.weighted_coulG(self, kpt, False, mesh, omega = omega_stc)
     
