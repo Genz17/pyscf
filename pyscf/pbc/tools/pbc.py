@@ -492,6 +492,58 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             # for SR WS truncated kernel
             raise NotImplementedError
 
+    elif exxdiv == 'smooth_vcut_sph':  # arXiv 2609.00203
+
+        assert (cell.dimension == 3)
+
+        if omega_stc is None:
+            Rc = (3*len(kpts)*cell.vol/(4*np.pi))**(1./3)
+            omega_stc = mf.omega_dot_Rc / Rc
+
+        if abs(_omega) < 1e-9:
+
+            with np.errstate(divide='ignore',invalid='ignore'):
+                coulG = 4*np.pi/absG2*(1.0 - np.cos(np.sqrt(absG2)*Rc))
+            coulG[absG2==0] = 4*np.pi*0.5*Rc**2
+
+            f = np.exp(-absG2*0.25/(omega_stc)**2.)
+            v0 = coulG[absG2==0].copy()
+
+            coulG *= f
+
+            if withSR: # only for dealing with rsdf
+                with np.errstate(divide='ignore',invalid='ignore'):
+                    coulG += 4*np.pi/absG2 * (1. - f)
+
+            coulG[absG2==0] = v0 + np.pi/(omega_stc)**2. # For RSDF, the short range part is subtracted, added back here
+
+
+            if cell.dimension < 3:
+                raise NotImplementedError
+
+        elif _omega >= 1e-9:
+
+            from scipy.special import erf
+
+            with np.errstate(divide='ignore',invalid='ignore'):
+                coulG = (-4*np.pi/absG2) * (erf(_omega * Rc) * np.cos(kG * Rc)) + \
+                        (2*np.pi/absG2) * np.exp(-absG2/(4 * _omega**2)) * (erf(_omega*(Rc + 1j * kG/(2*_omega**2))) + erf(_omega*(Rc - 1j * kG/(2*_omega**2))))
+            erfVal = erf(_omega * Rc)
+            coulG[absG2==0] = 2 * np.pi * (erfVal * Rc**2 - erfVal / (2 * _omega**2) + _omega * Rc * np.exp(- (_omega * Rc) ** 2) / (_omega**2 * np.sqrt(np.pi)))
+
+            f = np.exp(-absG2*0.25/(omega_stc)**2.)
+
+            v0 = coulG[absG2==0]
+            coulG *= f
+
+            with np.errstate(divide='ignore',invalid='ignore'):
+                coulG += 4*np.pi*(np.exp(-absG2*0.25/(_omega)**2.))/absG2 * (1. - f)
+
+            coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
+
+            if cell.dimension < 3:
+                raise NotImplementedError
+
     elif exxdiv == 'smooth_vcut_ws':  # arXiv 2609.00203
 
         assert (cell.dimension == 3)
@@ -692,7 +744,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     if _omega != 0 and cell.dimension != 3:
         logger.warn(cell, 'The coulG kernel for range-separated Coulomb potential '
                     f'for PBC {cell.dimension} is inaccurate.')
-    if _omega > 0 and exxdiv not in ('vcut_ws', 'smooth_vcut_ws', 'vcut_sph', 'smooth_vcut_sph'):
+    if _omega > 0 and exxdiv not in ('smooth_vcut_ws', 'smooth_vcut_sph'):
         # note this is the correct LR kernel in reciprocal space
         coulG *= np.exp(-.25/_omega**2 * absG2)
     elif _omega < 0:

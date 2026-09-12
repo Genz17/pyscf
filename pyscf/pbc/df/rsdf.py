@@ -145,6 +145,10 @@ cell.dimension=3 with large vacuum.""")
             Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
             self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
             self.omega_j2c = self.omega # this actually only affects the SR branch
+        if self.exxdiv == 'smooth_vcut_sph':
+            Rc = (3*nkpts*cell.vol/(4*np.pi))**(1./3)
+            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
+            self.omega_j2c = self.omega # this actually only affects the SR branch
 
         exxTEMP = self.exxdiv
         GDF.__init__(self, cell, kpts=kpts)
@@ -746,7 +750,7 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
         if exx == 'smooth_vcut_ws':
             return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
         elif exx == 'smooth_vcut_sph':
-            raise NotImplementedError
+            return aft.weighted_coulG(self, kpt, exx, mesh, omega = omega, omega_stc = omega_stc, withSR = False)
         else:
             return aft.weighted_coulG(self, kpt, False, mesh, omega = omega_stc)
     

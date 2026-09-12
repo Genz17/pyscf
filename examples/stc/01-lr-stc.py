@@ -55,26 +55,7 @@ if __name__ == "__main__":
     kmf.kernel()
     dm = kmf.make_rdm1()
 
-    #kmf = scf.KRHF(cell, kpts=kpts, exxdiv=None)
-    #kmf = density_fit(kmf, exxdiv='vcut_ws', omega_dot_Rc=4)
-    #kmf.verbose = 4
-    #kmf.kernel()
-    #dm_prime = kmf.make_rdm1()
-
-    #print(numpy.linalg.norm(dm - dm_prime))
-
-
-
-
-    kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
-    kmf_stc.with_df = FFTDF_STC(cell, kpts=kpts)
-    kmf_stc.with_df.omega_dot_Rc = args.odr
-
     omega = 0.2
-    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
-
-    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))
-    print("Exchange Energy by FFTDF_STC: ", exchange_energy)
 
 
     kmf_fft_ewald = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='ewald')
@@ -84,40 +65,74 @@ if __name__ == "__main__":
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk) / numpy.prod(numpy.array(kmesh))
     print("Exchange Energy by FFTDF_EWALD: ", exchange_energy)
 
+    kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_sph')
+    kmf_stc.with_df = FFTDF(cell, kpts=kpts)
+    kmf_stc.with_df.omega_dot_Rc = args.odr
+    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by FFTDF_SPH: ", exchange_energy)
+
+
     kmf_fft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
     kmf_fft_ws.with_df = FFTDF(cell, kpts=kpts)
     vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega) 
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
-    print("Exchange Energy by FFTDF_TC: ", exchange_energy)
+    print("Exchange Energy by FFTDF_TC_WS: ", exchange_energy)
 
+    kmf_stc = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
+    kmf_stc.with_df = FFTDF_STC(cell, kpts=kpts)
+    kmf_stc.with_df.omega_dot_Rc = args.odr
+    vj_stc, vk_stc = kmf_stc.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_stc) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by FFTDF_STC_WS: ", exchange_energy)
 
     kmf_fft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
     kmf_fft_ws.with_df = FFTDF(cell, kpts=kpts)
     vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
-    print("Exchange Energy by FFTDF_TC: ", exchange_energy)
+    print("Exchange Energy by FFTDF_TC_WS: ", exchange_energy)
+
+    kmf_fft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_sph')
+    kmf_fft_ws.with_df = FFTDF(cell, kpts=kpts)
+    vj_ws, vk_ws = kmf_fft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by FFTDF_TC_SPH: ", exchange_energy)
+
 
     kmf_aft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='vcut_ws')
     kmf_aft_ws.with_df = AFTDF_STC(cell, kpts=kpts)
     vj_ws, vk_ws = kmf_aft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
 
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
-    print("Exchange Energy by AFTDF_TC: ", exchange_energy)
+    print("Exchange Energy by AFTDF_STC: ", exchange_energy)
 
     kmf_aft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
     kmf_aft_ws.with_df = AFTDF(cell, kpts=kpts)
     vj_ws, vk_ws = kmf_aft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
-
     exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
-    print("Exchange Energy by AFTDF_TC: ", exchange_energy)
+    print("Exchange Energy by AFTDF_STC_WS: ", exchange_energy)
+
+    kmf_aft_ws = pyscf.pbc.scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_sph')
+    kmf_aft_ws.with_df = AFTDF(cell, kpts=kpts)
+    vj_ws, vk_ws = kmf_aft_ws.get_jk(dm_kpts=dm, with_j = False, with_k = True, omega = omega)
+    exchange_energy = - 0.25 * numpy.einsum('kij,kji -> ', dm, vk_ws) / numpy.prod(numpy.array(kmesh))
+    print("Exchange Energy by AFTDF_STC_SPH: ", exchange_energy)
+
 
     kmf_rsdf_ws = scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
     kmf_rsdf_ws.with_df = RSGDF(cell, kpts=kpts, exxdiv = 'smooth_vcut_ws')
     _, vk_ws = kmf_rsdf_ws.get_jk(dm_kpts=dm, with_j=False, with_k=True, omega=omega)
     exchange_energy = (-0.25 * numpy.einsum('kij,kji->', dm, vk_ws) / len(kpts))
-    print("Exchange Energy by RSDF_STC:", exchange_energy)
+    print("Exchange Energy by RSDF_STC_WS:", exchange_energy)
+
+    kmf_rsdf_ws = scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_sph')
+    kmf_rsdf_ws.with_df = RSGDF(cell, kpts=kpts, exxdiv = 'smooth_vcut_sph')
+    _, vk_ws = kmf_rsdf_ws.get_jk(dm_kpts=dm, with_j=False, with_k=True, omega=omega)
+    exchange_energy = (-0.25 * numpy.einsum('kij,kji->', dm, vk_ws) / len(kpts))
+    print("Exchange Energy by RSDF_STC_SPH:", exchange_energy)
+
 
     kmf_rsdf_ws = scf.KRHF(cell, kpts=kpts, exxdiv=None)
     kmf_rsdf_ws = density_fit(kmf_rsdf_ws, exxdiv='vcut_ws', omega_dot_Rc=args.odr)
