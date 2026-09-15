@@ -375,8 +375,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
 
     if exxdiv == 'vcut_sph':  # PRB 77 193110
 
+        Rc = (3*Nk*cell.vol/(4*np.pi))**(1./3)
         if abs(_omega) < 1e-9:
-            Rc = (3*Nk*cell.vol/(4*np.pi))**(1./3)
             with np.errstate(divide='ignore',invalid='ignore'):
                 coulG = 4*np.pi/absG2*(1.0 - np.cos(np.sqrt(absG2)*Rc))
             coulG[absG2==0] = 4*np.pi*0.5*Rc**2
@@ -385,25 +385,26 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
                 raise NotImplementedError
         elif _omega >= 1e-9:
             # this should be numerical unstable
-            from scipy.special import erf
-
+            from scipy.special import erf, erfcx
             q = np.sqrt(absG2)
+            a = _omega * Rc
+            b = q / (2 * _omega)
+            erfVal = erf(a)
 
-            with np.errstate(divide='ignore',invalid='ignore'):
-                coulG = (-4*np.pi/absG2) * (erf(_omega * Rc) * np.cos(q * Rc)) + \
-                        (2*np.pi/absG2) * np.exp(-absG2/(4 * _omega**2)) * (erf(_omega*(Rc + 1j * q/(2*_omega**2))) + erf(_omega*(Rc - 1j * q/(2*_omega**2))))
-            erfVal = erf(_omega * Rc)
-            coulG[absG2==0] = 2 * np.pi * (erfVal * Rc**2 - erfVal / (2 * _omega**2) + _omega * Rc * np.exp(- (_omega * Rc) ** 2) / (_omega**2 * np.sqrt(np.pi)))
+            t = (
+                np.exp(-b*b)
+                - np.exp(-a*a)
+                * (np.exp(-1j*q*Rc) * erfcx(a + 1j*b)).real
+            )
 
-            f = np.exp(-absG2*0.25/(omega_stc)**2.)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                coulG = 4*np.pi/absG2 * (t - erfVal*np.cos(q*Rc))
 
-            v0 = coulG[absG2==0]
-            coulG *= f
+            coulG[absG2 == 0] = 2*np.pi * (
+                erfVal * (Rc**2 - 1/(2*_omega**2))
+                + Rc*np.exp(-a*a)/(_omega*np.sqrt(np.pi))
+            )
 
-            with np.errstate(divide='ignore',invalid='ignore'):
-                coulG += 4*np.pi*(np.exp(-absG2*0.25/(_omega)**2.))/absG2 * (1. - f)
-
-            coulG[absG2==0] = v0 + np.pi/(omega_stc)**2.
 
             if cell.dimension < 3:
                 raise NotImplementedError
@@ -553,15 +554,25 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         elif _omega >= 1e-9:
             # this should be numerical unstable
 
-            from scipy.special import erf
-
+            from scipy.special import erf, erfcx
             q = np.sqrt(absG2)
+            a = _omega * Rc
+            b = q / (2 * _omega)
+            erfVal = erf(a)
 
-            with np.errstate(divide='ignore',invalid='ignore'):
-                coulG = (-4*np.pi/absG2) * (erf(_omega * Rc) * np.cos(q * Rc)) + \
-                        (2*np.pi/absG2) * np.exp(-absG2/(4 * _omega**2)) * (erf(_omega*(Rc + 1j * q/(2*_omega**2))) + erf(_omega*(Rc - 1j * q/(2*_omega**2))))
-            erfVal = erf(_omega * Rc)
-            coulG[absG2==0] = 2 * np.pi * (erfVal * Rc**2 - erfVal / (2 * _omega**2) + _omega * Rc * np.exp(- (_omega * Rc) ** 2) / (_omega**2 * np.sqrt(np.pi)))
+            t = (
+                np.exp(-b*b)
+                - np.exp(-a*a)
+                * (np.exp(-1j*q*Rc) * erfcx(a + 1j*b)).real
+            )
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                coulG = 4*np.pi/absG2 * (t - erfVal*np.cos(q*Rc))
+
+            coulG[absG2 == 0] = 2*np.pi * (
+                erfVal * (Rc**2 - 1/(2*_omega**2))
+                + Rc*np.exp(-a*a)/(_omega*np.sqrt(np.pi))
+            )
 
             f = np.exp(-absG2*0.25/(omega_stc)**2.)
 
@@ -987,12 +998,15 @@ def precompute_lr_exx(cell, kpts=None, precision=None, nimgs=None, omega = None,
 
     if omega_stc is None:
         Gmax = 2 * alpha * np.sqrt(log_precision) # this could be insufficient
+        kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
+        if np.prod(kcell.mesh) < np.prod(cell.mesh):
+            kcell.mesh = cell.mesh
     else:
         assert ( (isinstance(omega_stc, float)) )
         assert (  (omega > 1e-9) )
         Gmax = 2 * max(omega, omega_stc) * np.sqrt(log_precision) # this should be sufficient
 
-    kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
+        kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
     log.debug('# kcell.mesh FFT = %s', kcell.mesh)
 
     rs = kcell.get_uniform_grids(wrap_around=False)

@@ -48,7 +48,7 @@ import numpy as np
 from pyscf import lib
 from pyscf.lib import logger, zdotCN
 from pyscf.lib import parameters as param
-from pyscf.pbc.df.df import GDF, AFTDF
+from pyscf.pbc.df.df import GDF 
 from pyscf.pbc.df import aft, aft_jk
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import rsdf_helper
@@ -163,12 +163,12 @@ cell.dimension=3 with large vacuum.""")
 
         if omega is not None and omega > 1e-9:  # J/K for RSH functionals
 
-            aftdf_df = AFTDF(self.cell, self.kpts)
+            aftdf_df = aft.AFTDF(self.cell, self.kpts)
             aftdf_df.omega_dot_Rc = self.omega_dot_Rc
             aftdf_df.stdout = self.stdout
             aftdf_df.verbose = self.verbose
             aftdf_df.max_memory = self.max_memory
-            return aftdf_df.get_jk(self, dm, hermi, kpts, kpts_band, with_j, with_k,
+            return aftdf_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
                                  omega=omega, exxdiv=exxdiv) # GDF folds back to AFTDF
 
         from pyscf.pbc.df.aft import _check_kpts
