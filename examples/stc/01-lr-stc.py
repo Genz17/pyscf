@@ -117,13 +117,13 @@ if __name__ == "__main__":
 
 
     kmf_rsdf_ws = scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_ws')
-    kmf_rsdf_ws.with_df = RSGDF(cell, kpts=kpts, exxdiv = 'smooth_vcut_ws')
+    kmf_rsdf_ws.with_df = RSGDF(cell, kpts=kpts)
     _, vk_ws = kmf_rsdf_ws.get_jk(dm_kpts=dm, with_j=False, with_k=True, omega=omega)
     exchange_energy = (-0.25 * numpy.einsum('kij,kji->', dm, vk_ws) / len(kpts))
     print("Exchange Energy by RSDF_STC_WS:", exchange_energy)
 
     kmf_rsdf_ws = scf.KRHF(cell, kpts=kpts, exxdiv='smooth_vcut_sph')
-    kmf_rsdf_ws.with_df = RSGDF(cell, kpts=kpts, exxdiv = 'smooth_vcut_sph')
+    kmf_rsdf_ws.with_df = RSGDF(cell, kpts=kpts)
     _, vk_ws = kmf_rsdf_ws.get_jk(dm_kpts=dm, with_j=False, with_k=True, omega=omega)
     exchange_energy = (-0.25 * numpy.einsum('kij,kji->', dm, vk_ws) / len(kpts))
     print("Exchange Energy by RSDF_STC_SPH:", exchange_energy)

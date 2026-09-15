@@ -85,9 +85,9 @@ class RSGDF(GDF):
 
     omega_dot_Rc = 4. # for the purpose of doing exxdiv = smooth_vcut
 
-    def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh = None, omega_stc = None, omega=None):
-        # this is actually not used at all
-        return 
+    #def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh = None, omega_stc = None, omega=None):
+    #    # this is actually not used at all
+    #    return 
 
     def __init__(self, cell, kpts=np.zeros((1,3)), exxdiv = 'ewald'):
         if cell.dimension < 3:
@@ -138,21 +138,9 @@ cell.dimension=3 with large vacuum.""")
         # first, and ED is called only if CD fails.
         self.j2c_eig_always = False
 
-        self.exxdiv = exxdiv
-        if self.exxdiv == 'smooth_vcut_ws':
-            from pyscf.pbc.lo.base import get_kmesh
-            kmesh = get_kmesh(cell, kpts)
-            Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
-            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
-            self.omega_j2c = self.omega # this actually only affects the SR branch
-        if self.exxdiv == 'smooth_vcut_sph':
-            Rc = (3*len(kpts)*cell.vol/(4*np.pi))**(1./3)
-            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
-            self.omega_j2c = self.omega # this actually only affects the SR branch
 
-        exxTEMP = self.exxdiv
         GDF.__init__(self, cell, kpts=kpts)
-        self.exxdiv = exxTEMP
+        self.exxdiv = exxdiv
 
         self.with_df_j = None
 
@@ -161,15 +149,18 @@ cell.dimension=3 with large vacuum.""")
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
                with_j=True, with_k=True, omega=None, exxdiv=None):
 
-        if omega is not None and omega > 1e-9:  # J/K for RSH functionals
+        omega_eff = self.cell.omega if omega is None else omega
 
+        if abs(omega_eff) > 1e-9 or abs(self.cell.omega) > 1e-9:  # J/K for RSH functionals, also support omega_eff < 0
+            print('Falls to AFTDF, computing _omega = %.4f' % omega_eff)
             aftdf_df = aft.AFTDF(self.cell, self.kpts)
+            aftdf_df.mesh = self.cell.mesh
             aftdf_df.omega_dot_Rc = self.omega_dot_Rc
             aftdf_df.stdout = self.stdout
             aftdf_df.verbose = self.verbose
             aftdf_df.max_memory = self.max_memory
             return aftdf_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
-                                 omega=omega, exxdiv=exxdiv) # GDF folds back to AFTDF
+                                 omega=omega_eff, exxdiv=exxdiv) # GDF folds back to AFTDF
 
         from pyscf.pbc.df.aft import _check_kpts
         from pyscf.pbc.df import df_jk
@@ -186,6 +177,10 @@ cell.dimension=3 with large vacuum.""")
 
         vk = vj = None
         if with_k:
+            if self.exxdiv != exxdiv:
+                self.exxdiv = exxdiv
+                self._cderi = None
+                self.mesh_compact = self.mesh_j2c = None
             vk = df_jk.get_k_kpts(self, dm, hermi, kpts, kpts_band, exxdiv)
         if with_j:
             vj = df_jk.get_j_kpts(self.with_df_j, dm, hermi, kpts, kpts_band)
@@ -193,6 +188,7 @@ cell.dimension=3 with large vacuum.""")
         return vj, vk
 
     def reset(self, cell=None):
+        from pyscf.pbc.lib.kpts import KPoints
         if cell is not None:
             if isinstance(self._kpts, KPoints):
                 self._kpts.reset(cell)
@@ -254,6 +250,21 @@ cell.dimension=3 with large vacuum.""")
         return self
 
     def _rs_build(self):
+
+        cell, kpts = self.cell, self.kpts
+
+        if self.exxdiv == 'smooth_vcut_ws':
+            from pyscf.pbc.lo.base import get_kmesh
+            kmesh = get_kmesh(cell, kpts)
+            Rc = get_ws_inradius(cell.lattice_vectors(), kmesh)
+            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
+            self.omega_j2c = self.omega # this actually only affects the SR branch
+        if self.exxdiv == 'smooth_vcut_sph':
+            Rc = (3*len(kpts)*cell.vol/(4*np.pi))**(1./3)
+            self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
+            self.omega_j2c = self.omega # this actually only affects the SR branch
+
+
         log = logger.Logger(self.stdout, self.verbose)
 
         # find kmax
@@ -638,7 +649,8 @@ class _RSGDFBuilder(rsdf_builder._RSGDFBuilder):
         data_version = 'v1'
         if h5py.is_hdf5(cderi_file):
             feri = lib.H5FileWrap(cderi_file, 'a')
-            if 'kpts' in feri:
+            #if 'kpts' in feri:
+            if 'j3c-kptij' in feri:
                 del feri['j3c-kptij']
             if dataname in feri:
                 log.warn(f'Overwritting {dataname} in {cderi_file}.')

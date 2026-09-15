@@ -305,6 +305,15 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     else:
         _omega = omega
 
+    if _omega < 0 and exxdiv in (
+        'vcut_sph', 'vcut_ws',
+        'smooth_vcut_sph', 'smooth_vcut_ws'):
+        # for SR
+        return (
+            get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, omega=0.0, omega_stc=omega_stc, withSR=withSR, **kwargs)
+            - get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, omega=-_omega, omega_stc=omega_stc, withSR=withSR, **kwargs)
+        )
+
     if cell.dimension == 0 and cell.low_dim_ft_type != 'inf_vacuum':
         a = cell.lattice_vectors()
         assert abs(np.eye(3)*a[0,0] - a).max() < 1e-6, \
@@ -384,7 +393,6 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             if cell.dimension < 3:
                 raise NotImplementedError
         elif _omega >= 1e-9:
-            # this should be numerical unstable
             from scipy.special import erf, erfcx
             q = np.sqrt(absG2)
             a = _omega * Rc
@@ -670,7 +678,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             if not getattr(mf, '_ws_lr_exx', None):
                 mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
 
-            if abs(_omega - mf._ws_lr_exx['alpha']) > 1e-9:
+            if abs(_omega - mf._ws_lr_exx['alpha']) > 1e-9 or abs(omega_stc - mf._ws_lr_exx['omega_stc']) > 1e-9:
                 mf._ws_lr_exx = precompute_lr_exx(cell, kpts, omega = _omega, omega_stc = omega_stc)
 
             exx_alpha = mf._ws_lr_exx['alpha']
@@ -999,8 +1007,8 @@ def precompute_lr_exx(cell, kpts=None, precision=None, nimgs=None, omega = None,
     if omega_stc is None:
         Gmax = 2 * alpha * np.sqrt(log_precision) # this could be insufficient
         kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
-        if np.prod(kcell.mesh) < np.prod(cell.mesh):
-            kcell.mesh = cell.mesh
+        mesh_min = 2*(np.asarray(cell.mesh)*kmesh//2) + 1
+        kcell.mesh = np.maximum(kcell.mesh, mesh_min)
     else:
         assert ( (isinstance(omega_stc, float)) )
         assert (  (omega > 1e-9) )
@@ -1047,6 +1055,7 @@ def precompute_lr_exx(cell, kpts=None, precision=None, nimgs=None, omega = None,
         raise RuntimeError('Unconventional lattice was found')
 
     ws_lr_exx = {'alpha': alpha,
+                 'omega_stc': omega_stc,
                 'kcell': kcell,
                 'q'    : kcell.Gv,
                 'vq'   : vG.real.copy(),
