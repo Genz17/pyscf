@@ -48,7 +48,7 @@ import numpy as np
 from pyscf import lib
 from pyscf.lib import logger, zdotCN
 from pyscf.lib import parameters as param
-from pyscf.pbc.df.df import GDF
+from pyscf.pbc.df.df import GDF, AFTDF
 from pyscf.pbc.df import aft, aft_jk
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df import rsdf_helper
@@ -146,7 +146,7 @@ cell.dimension=3 with large vacuum.""")
             self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
             self.omega_j2c = self.omega # this actually only affects the SR branch
         if self.exxdiv == 'smooth_vcut_sph':
-            Rc = (3*nkpts*cell.vol/(4*np.pi))**(1./3)
+            Rc = (3*len(kpts)*cell.vol/(4*np.pi))**(1./3)
             self.omega = self.omega_dot_Rc / Rc # this actually only affects the SR branch. LR is set by the scf obj exxdiv
             self.omega_j2c = self.omega # this actually only affects the SR branch
 
@@ -161,9 +161,15 @@ cell.dimension=3 with large vacuum.""")
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
                with_j=True, with_k=True, omega=None, exxdiv=None):
 
-        if omega is not None and omega != 0:  # J/K for RSH functionals
-            return GDF.get_jk(self, dm, hermi, kpts, kpts_band, with_j, with_k,
-                                 omega=omega, exxdiv=exxdiv) # folds back to aftdf
+        if omega is not None and omega > 1e-9:  # J/K for RSH functionals
+
+            aftdf_df = AFTDF(self.cell, self.kpts)
+            aftdf_df.omega_dot_Rc = self.omega_dot_Rc
+            aftdf_df.stdout = self.stdout
+            aftdf_df.verbose = self.verbose
+            aftdf_df.max_memory = self.max_memory
+            return aftdf_df.get_jk(self, dm, hermi, kpts, kpts_band, with_j, with_k,
+                                 omega=omega, exxdiv=exxdiv) # GDF folds back to AFTDF
 
         from pyscf.pbc.df.aft import _check_kpts
         from pyscf.pbc.df import df_jk
