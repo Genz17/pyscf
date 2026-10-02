@@ -5,12 +5,9 @@ import argparse
 import pyscf
 from pyscf import lib
 from pyscf.pbc import gto, scf
-from pyscf.pbc.df.fft_stc import FFTDF_STC
 from pyscf.pbc.df.fft import FFTDF
 from pyscf.pbc.df.aft import AFTDF
-from pyscf.pbc.df.aft_stc import AFTDF_STC
 from pyscf.pbc.df.rsdf import RSGDF
-from pyscf.pbc.df.rsdf_stc import density_fit
 
 numpy.set_printoptions(threshold=numpy.inf, linewidth=numpy.inf)
 numpy.set_printoptions(suppress=True, precision=8)
@@ -128,13 +125,3 @@ if __name__ == "__main__":
     exchange_energy = (-0.25 * numpy.einsum('kij,kji->', dm, vk_ws) / len(kpts))
     print("Exchange Energy by RSDF_STC_SPH:", exchange_energy)
 
-
-    kmf_rsdf_ws = scf.KRHF(cell, kpts=kpts, exxdiv=None)
-    kmf_rsdf_ws = density_fit(kmf_rsdf_ws, exxdiv='vcut_ws', omega_dot_Rc=args.odr)
-    _, vk_ws = kmf_rsdf_ws.get_jk(dm_kpts=dm, with_j=False, with_k=True, omega=omega)
-    exchange_energy = (-0.25 * numpy.einsum('kij,kji->', dm, vk_ws) / len(kpts))
-    print("Exchange Energy by RSDF_STC:", exchange_energy)
-
-
-    #print(numpy.linalg.norm(vk - vk_stc)/numpy.linalg.norm(vk))
-    #print(numpy.linalg.norm(vk_ws - vk_stc)/numpy.linalg.norm(vk_ws))

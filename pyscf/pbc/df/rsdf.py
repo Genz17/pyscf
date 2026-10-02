@@ -159,6 +159,33 @@ cell.dimension=3 with large vacuum.""")
             aftdf_df.stdout = self.stdout
             aftdf_df.verbose = self.verbose
             aftdf_df.max_memory = self.max_memory
+
+            if omega_eff > 1e-9 and with_k and exxdiv == 'smooth_vcut_ws':
+                from pyscf.pbc.lo.base import get_kmesh
+
+                kmesh = get_kmesh(self.cell, self.kpts)
+                Rc = get_ws_inradius(self.cell.lattice_vectors(), kmesh)
+                omega_stc = self.omega_dot_Rc / Rc
+
+                # Both Gaussian decay scales enter the LR-STC kernel.
+                sigma = max(omega_eff, omega_stc)
+
+                # Largest momentum transfer required for exchange.
+                kmax = max(
+                    np.linalg.norm(self.kpts - k, axis=1).max()
+                    for k in self.kpts
+                )
+
+                _, mesh = rsdf_helper.estimate_mesh_for_omega(
+                    self.cell,
+                    sigma,
+                    precision=self.precision_G,
+                    kmax=kmax,
+                    round2odd=True,
+                )
+                aftdf_df.mesh = self.cell.symmetrize_mesh(mesh)
+
+
             return aftdf_df.get_jk(dm, hermi, kpts, kpts_band, with_j, with_k,
                                  omega=omega_eff, exxdiv=exxdiv) # GDF folds back to AFTDF
 
