@@ -89,3 +89,4 @@ tmp/
 # mypy
 .mypy_cache/
 
+.venv
