@@ -233,10 +233,10 @@ def _get_jk(mf, cell, dm, hermi, kpts, kpts_band=None, with_j=True, kshift=0):
     if omega == 0:
         vj, vk = mf.get_jk(cell, dm, hermi, kpts, kpts_band)
         vk *= hyb
-    elif alpha == 0: # LR=0, only SR exchange
-        vk = mf.get_k(cell, dm, hermi, kpts, kpts_band, omega=-omega)
-        vk *= hyb
-        vj = mf.get_j(cell, dm, hermi, kpts, kpts_band)
+    #elif alpha == 0: # LR=0, only SR exchange
+    #    vk = mf.get_k(cell, dm, hermi, kpts, kpts_band, omega=-omega)
+    #    vk *= hyb
+    #    vj = mf.get_j(cell, dm, hermi, kpts, kpts_band)
     elif hyb == 0: # SR=0, only LR exchange
         vk = mf.get_k(cell, dm, hermi, kpts, kpts_band, omega=omega)
         vk *= alpha

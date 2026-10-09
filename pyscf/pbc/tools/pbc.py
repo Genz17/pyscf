@@ -309,6 +309,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         'vcut_sph', 'vcut_ws',
         'smooth_vcut_sph', 'smooth_vcut_ws'):
         # for SR
+        # for now this is not called
         return (
             get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, omega=0.0, omega_stc=omega_stc, withSR=withSR, **kwargs)
             - get_coulG(cell, k, exx, mf, mesh, Gv, wrap_around, omega=-_omega, omega_stc=omega_stc, withSR=withSR, **kwargs)
