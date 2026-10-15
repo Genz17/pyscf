@@ -21,21 +21,31 @@ from pyscf import __config__
 from scipy import linalg
 from copy import deepcopy
 
-def _aux_shell_blocks(auxmol, blockdim):
-    """Yield shell and function bounds, keeping whole auxiliary shells."""
+def _aux_shell_blocks(auxmol, block_nao):
+    """Yield (sh0, sh1, q0, q1) for whole-shell auxiliary blocks.
+    """
+
     loc = auxmol.ao_loc_nr()
     sh0 = 0
-    while sh0 < auxmol.nbas:
-        sh1 = sh0 + 1
-        while sh1 < auxmol.nbas and loc[sh1 + 1] - loc[sh0] <= blockdim:
-            sh1 += 1
-        yield sh0, sh1, int(loc[sh0]), int(loc[sh1])
-        sh0 = sh1
 
+    while sh0 < auxmol.nbas:
+        # Always include at least one complete shell.
+        sh1 = sh0 + 1
+
+        # Add shells while the function count fits.
+        while (sh1 < auxmol.nbas
+               and loc[sh1 + 1] - loc[sh0] <= block_nao):
+            sh1 += 1
+
+        q0 = int(loc[sh0])
+        q1 = int(loc[sh1])
+        yield sh0, sh1, q0, q1
+
+        sh0 = sh1
 
 class PARI(lib.StreamObject):
 
-    _keys = {'mol', 'auxmol', 'auxbasis', 'blockdim', 'max_memory',
+    _keys = {'mol', 'auxmol', 'auxbasis', 'block_nao', 'max_memory',
              'verbose', 'stdout', '_pari_file'}
 
     def __init__(self, mol, auxbasis=None):
@@ -45,7 +55,7 @@ class PARI(lib.StreamObject):
         self.stdout = mol.stdout
         self.verbose = mol.verbose
         self.max_memory = mol.max_memory
-        self.blockdim = 64
+        self.block_nao = 1000
         self._df_j = df.DF(mol, auxbasis=auxbasis)
         self._built = False
         self._tmpfile = None
@@ -58,8 +68,8 @@ class PARI(lib.StreamObject):
         log.info('******** %s ********', self.__class__)
         log.info('auxbasis = %s', self.auxbasis)
         log.info('PARI cache = %s', self._pari_file)
-        log.info('blockdim = %s; max_memory = %s MB',
-                 self.blockdim, self.max_memory)
+        log.info('block_nao = %s; max_memory = %s MB',
+                 self.block_nao, self.max_memory)
         return self
     
     def reset(self, mol=None):
@@ -84,7 +94,7 @@ class PARI(lib.StreamObject):
         return max(
             1,
             min(
-                int(self.blockdim),
+                int(self.block_nao),
                 int(0.8 * available / bytes_per_q),
             ),
         )
@@ -109,6 +119,8 @@ class PARI(lib.StreamObject):
             f.attrs['complete'] = False
             f['ao_slices'] = ao_slices
             f['aux_slices'] = aux_slices
+
+            f['metric'] = metric
             groups = f.create_group('coeffs')
 
             # Fit each unordered atom pair only in its own auxiliary domain.
@@ -129,179 +141,251 @@ class PARI(lib.StreamObject):
                     ints = np.concatenate(integrals, axis=2)
                     vlocal = metric[np.ix_(aux_idx, aux_idx)]
                     rhs = ints.reshape(-1, len(aux_idx)).T
-                    try:
-                        cab = linalg.solve(vlocal, rhs, assume_a='pos').T
-                    except linalg.LinAlgError as err:
-                        raise linalg.LinAlgError(
-                            f'PARI metric for atom pair ({A}, {B}) is not '
-                            'positive definite; remove local auxiliary '
-                            'linear dependence before fitting.') from err
+
+                    cab = linalg.solve(vlocal, rhs, assume_a='pos').T
                     cab = cab.reshape(a1 - a0, b1 - b0, len(aux_idx))
+
                     group = groups.create_group(f'{A}_{B}')
                     group['aux_idx'] = aux_idx
                     group['C'] = cab
                     del integrals, ints, rhs, vlocal, cab
+            metric_factor = linalg.cho_factor(metric, lower=True, overwrite_a=True, check_finite=False)
 
-            # Q is GLOBAL here, even though the contracted R domain is local.
-            # A contiguous Q-first dataset supports sequential block reads.
-            wdata = f.create_dataset('W', (naux, nao, nao), dtype='f8')
-            blockdim = self._block_size()
-            for qsh0, qsh1, q0, q1 in _aux_shell_blocks(auxmol, blockdim):
+            jdata = f.create_dataset('J_coeff', shape=(nao, nao, naux), dtype='f8')
+
+            for sh0, sh1, a0, a1 in _aux_shell_blocks(mol, self.block_nao):
                 ints = df.incore.aux_e2(
                     mol, auxmol, aosym='s1',
-                    shls_slice=(0, mol.nbas, 0, mol.nbas, qsh0, qsh1))
-                w = np.ascontiguousarray(ints.transpose(2, 0, 1))
-                del ints
-                for A in range(mol.natm):
-                    a0, a1 = ao_slices[A, 2:]
-                    for B in range(A, mol.natm):
-                        b0, b1 = ao_slices[B, 2:]
-                        group = groups[f'{A}_{B}']
-                        aux_idx = group['aux_idx'][:]
-                        cab = group['C'][:]
-                        correction = np.einsum(
-                            'abr,rq->qab', cab, metric[aux_idx, q0:q1],
-                            optimize=True)
-                        w[:, a0:a1, b0:b1] -= 0.5 * correction
-                        if A != B:
-                            w[:, b0:b1, a0:a1] -= 0.5 * correction.transpose(0, 2, 1)
-                        del cab, correction
-                wdata[q0:q1] = w
-                del w
-                log.debug('PARI W auxiliary functions [%d:%d]', q0, q1)
+                    shls_slice=(
+                        sh0, sh1,       # First orbital index: this block
+                        0, mol.nbas,   # Second orbital index: all AOs
+                        0, auxmol.nbas,  # All auxiliary functions
+                    ),
+                )
+                # ints.shape = (a1 - a0, nao, naux)
+                rhs = ints.reshape(-1, naux).T
+
+                coeff = linalg.cho_solve(metric_factor, rhs, check_finite=False)
+                jdata[a0:a1, :, :] = coeff.T.reshape(a1 - a0, nao, naux)
+
+                del ints, rhs, coeff
+
             f.attrs['complete'] = True
 
         self._built = True
         log.timer('PARI build', *t0)
         return self
 
-    def loop(self, blksize=None):
-        """Yield (q0, q1, W_block), with W_block.shape = (q1-q0, nao, nao)."""
+    def loop(self, blksize=None, dm=None, with_k=True):
+        """Yield (q0, q1, W_block, J_block).
+
+        dm=None skips J.
+        with_k=False skips construction of W.
+        """
         if not self._built:
             self.build()
+
         if blksize is None:
             blksize = self._block_size()
-        blksize = max(1, int(blksize))
-        with h5py.File(self._pari_file, 'r') as f:
-            wdata = f['W']
-            for q0 in range(0, wdata.shape[0], blksize):
-                q1 = min(q0 + blksize, wdata.shape[0])
-                yield q0, q1, wdata[q0:q1]
+        blksize = int(blksize)
+        if blksize < 1:
+            raise ValueError('blksize must be positive')
 
-    def get_k(self, dm, hermi=1):
-        """Return K[mu,nu] = sum_(lambda,sigma) (mu lambda|nu sigma)_PARI dm.
-
-        Factor dm = M diag(sign) M.T. For a physical density sign is positive;
-        allowing negative signs also supports symmetric density differences.
-        Eigenvalues below floating-point roundoff relative to dm are dropped.
-        K contains no RHF -1/2 prefactor.
-        """
-        dm = np.asarray(dm)
-        nao = self.mol.nao_nr()
-        if (hermi != 1 or np.iscomplexobj(dm) or dm.shape != (nao, nao)
-                or not np.allclose(dm, dm.T, rtol=1e-10, atol=1e-12)):
-            raise ValueError('get_k expects one real symmetric (nao, nao) density.')
-        if not self._built:
-            self.build()
-        eig, vec = linalg.eigh(dm)
-        cutoff = np.finfo(float).eps * nao * np.max(np.abs(eig))
-        keep = np.abs(eig) > cutoff
-        m = vec[:, keep] * np.sqrt(np.abs(eig[keep]))
-        signs = np.sign(eig[keep])
-        if m.shape[1] == 0:
-            return np.zeros((nao, nao))
-        L = np.zeros((nao, nao))
-        blksize = self._block_size(nvec=m.shape[1])
+        mol, auxmol = self.mol, self.auxmol
 
         with h5py.File(self._pari_file, 'r') as f:
             ao_slices = f['ao_slices'][:]
             groups = f['coeffs']
-            for q0, q1, w in self.loop(blksize):
-                # D[Q,mu,i] = sum_lambda C[mu,lambda,Q] M[lambda,i]
-                d = np.zeros((q1 - q0, nao, m.shape[1]))
+
+            for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
+                ints = df.incore.aux_e2(
+                    mol, auxmol, aosym='s1',
+                    shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
+                )
+                # ints.shape = (nao, nao, q1 - q0)
+
+                # Standard DF Coulomb contribution from RAW integrals.
+                jblock = None
+                if dm is not None:
+                    rho = lib.einsum('ijq,ij->q', ints, dm)
+                    jcoeff = f['J_coeff'][:, :, q0:q1]
+                    jblock = lib.einsum('ijq,q->ij', jcoeff, rho)
+                    del jcoeff, rho
+
+                w = None
+                if with_k:
+                    w = np.ascontiguousarray(ints.transpose(2, 0, 1))
+                del ints
+
+                if with_k:
+                    # Read these columns once for all atom pairs.
+                    metric_block = f['metric'][:, q0:q1]
+
+                    for A in range(mol.natm):
+                        a0, a1 = ao_slices[A, 2:]
+
+                        for B in range(A, mol.natm):
+                            b0, b1 = ao_slices[B, 2:]
+                            group = groups[f'{A}_{B}']
+                            aux_idx = group['aux_idx'][:]
+                            cab = group['C'][:]
+
+                            correction = lib.einsum(
+                                'abr,rq->qab',
+                                cab, metric_block[aux_idx],
+                            )
+
+                            w[:, a0:a1, b0:b1] -= 0.5 * correction
+                            if A != B:
+                                w[:, b0:b1, a0:a1] -= (
+                                    0.5 * correction.transpose(0, 2, 1)
+                                )
+
+                            del cab, correction
+
+                    del metric_block
+
+                yield q0, q1, w, jblock
+                del w, jblock
+
+
+    def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
+               direct_scf_tol=1e-13, omega=None):
+        """Return standard DF J and PARI K for one real symmetric density.
+
+        direct_scf_tol is accepted for API compatibility; this implementation
+        does not apply density-based screening.
+        """
+        if not with_j and not with_k:
+            return None, None
+
+        if omega not in (None, 0):
+            raise NotImplementedError(
+                'Range-separated J/K is not implemented here.'
+            )
+
+        dm = np.asarray(dm)
+        nao = self.mol.nao_nr()
+
+        if (hermi != 1
+                or np.iscomplexobj(dm)
+                or dm.shape != (nao, nao)
+                or not np.allclose(dm, dm.T, rtol=1e-10, atol=1e-12)):
+            raise ValueError(
+                'get_jk expects one real symmetric density matrix.'
+            )
+
+        vj = np.zeros((nao, nao)) if with_j else None
+        vk = np.zeros((nao, nao)) if with_k else None
+
+        if not np.any(dm):
+            return vj, vk
+
+        # Factor dm only when exchange is requested.
+        nvec = 0
+        if with_k:
+            eig, vec = linalg.eigh(dm)
+            cutoff = np.finfo(float).eps * nao * np.max(np.abs(eig))
+            keep = np.abs(eig) > cutoff
+            m = vec[:, keep] * np.sqrt(np.abs(eig[keep]))
+            signs = np.sign(eig[keep])
+            nvec = m.shape[1]
+
+        do_k = with_k and nvec > 0
+        if not with_j and not do_k:
+            return vj, vk
+
+        if not self._built:
+            self.build()
+
+        blksize = self._block_size(nvec=nvec)
+        L = np.zeros((nao, nao)) if do_k else None
+
+        with h5py.File(self._pari_file, 'r') as f:
+            ao_slices = f['ao_slices'][:]
+            groups = f['coeffs']
+
+            for q0, q1, w, jblock in self.loop(
+                    blksize, dm=dm if with_j else None, with_k=do_k):
+
+                if with_j:
+                    vj += jblock
+                del jblock
+
+                if not do_k:
+                    continue
+
+                # d[Q, mu, i] = sum_lambda C[mu, lambda, Q] M[lambda, i]
+                d = np.zeros((q1 - q0, nao, nvec))
+
                 for A in range(self.mol.natm):
                     a0, a1 = ao_slices[A, 2:]
+
                     for B in range(A, self.mol.natm):
                         b0, b1 = ao_slices[B, 2:]
                         group = groups[f'{A}_{B}']
                         aux_idx = group['aux_idx'][:]
+
                         mask = (aux_idx >= q0) & (aux_idx < q1)
                         if not np.any(mask):
                             continue
-                        # Read one pair into NumPy before selecting its Qs.
-                        cab = group['C'][:, :, :][:, :, mask]
+
                         qlocal = aux_idx[mask] - q0
-                        d[qlocal, a0:a1] += np.einsum(
-                            'abq,bi->qai', cab, m[b0:b1], optimize=True)
+                        cab = group['C'][:][:, :, mask]
+
+                        d[qlocal, a0:a1] += lib.einsum(
+                            'abq,bi->qai', cab, m[b0:b1],
+                        )
                         if A != B:
-                            d[qlocal, b0:b1] += np.einsum(
-                                'abq,ai->qbi', cab, m[a0:a1], optimize=True)
+                            d[qlocal, b0:b1] += lib.einsum(
+                                'abq,ai->qbi', cab, m[a0:a1],
+                            )
+
                         del cab
-                # H[Q,nu,i] = sum_sigma W[Q,nu,sigma] M[sigma,i]
-                h = np.einsum('qns,si->qni', w, m, optimize=True)
+
+                h = lib.einsum('qns,si->qni', w, m)
                 h *= signs[None, None, :]
-                L += np.einsum('qmi,qni->mn', d, h, optimize=True)
+
+                L += lib.einsum('qmi,qni->mn', d, h)
                 del w, d, h
-        return L + L.T
 
-    def get_j(self, dm, hermi=1, direct_scf_tol=1e-13, omega=None):
-        self._df_j.auxbasis = self.auxbasis
-        self._df_j.max_memory = self.max_memory
-        self._df_j.blockdim = self.blockdim
-        self._df_j.verbose = self.verbose
-        self._df_j.stdout = self.stdout
-
-        vj, _ = self._df_j.get_jk(
-            dm,
-            hermi=hermi,
-            with_j=True,
-            with_k=False,
-            direct_scf_tol=direct_scf_tol,
-            omega=omega,
-        )
-        return vj
-
-    def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
-               direct_scf_tol=1e-13, omega=None):
-        if with_k and omega not in (None, 0):
-            raise NotImplementedError(
-                "Range-separated PARI K is not implemented."
-            )
-
-        vj = vk = None
-
-        if with_j:
-            vj = self.get_j(
-                dm, hermi=hermi,
-                direct_scf_tol=direct_scf_tol,
-                omega=omega,
-            )
-
-        if with_k:
-            vk = self.get_k(dm, hermi=hermi)
+        if do_k:
+            vk = L + L.T
 
         return vj, vk
 
+
+
 if __name__ == '__main__':
     from pyscf import gto, scf
+    import time
 
     mol = gto.M(
-        atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587',
+        atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587;',
         basis='ccpvqz', verbose=4)
-    pari = PARI(mol, auxbasis="ccpvqz-jkfit")
     mf = scf.RKS(mol)
     mf.xc = 'b3lyp'
+
+    s = time.perf_counter()
     mf.kernel()
+    e = time.perf_counter()
+    print("NO DF: %.5f" % (e-s))
 
     mf = scf.RKS(mol).density_fit()
     mf.with_df = PARI(mol, auxbasis = "ccpvqz-jkfit")
     mf.xc = 'b3lyp'
+    s = time.perf_counter()
     mf.kernel()
+    e = time.perf_counter()
+    print("PARI: %.5f" % (e-s))
 
     mf = scf.RKS(mol).density_fit()
     mf.with_df = DF(mol, auxbasis = "ccpvqz-jkfit")
     mf.xc = 'b3lyp'
+    s = time.perf_counter()
     mf.kernel()
+    e = time.perf_counter()
+    print("DF: %.5f" % (e-s))
     #dm = mf.make_rdm1()  # Includes the RHF factor of two in the occupations.
 
     #pari = PARI(mol, auxbasis='ccpvqz-jkfit')
