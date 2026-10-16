@@ -1,5 +1,4 @@
 import os
-
 import contextlib
 import numpy as np
 import h5py
@@ -18,8 +17,12 @@ from pyscf.ao2mo.incore import _conc_mos, iden_coeffs
 from pyscf.ao2mo.outcore import _load_from_h5g
 from pyscf import __config__
 
+import ctypes
 from scipy import linalg
 from copy import deepcopy
+
+
+libpari = lib.load_library("libpari")
 
 def _aux_shell_blocks(auxmol, block_nao):
     """Yield (sh0, sh1, q0, q1) for whole-shell auxiliary blocks.
@@ -55,7 +58,7 @@ class PARI(lib.StreamObject):
         self.stdout = mol.stdout
         self.verbose = mol.verbose
         self.max_memory = mol.max_memory
-        self.block_nao = 1000
+        self.block_nao = 240
         self._df_j = df.DF(mol, auxbasis=auxbasis)
         self._built = False
         self._tmpfile = None
@@ -81,117 +84,126 @@ class PARI(lib.StreamObject):
         return self
 
     def _block_size(self, nvec=0):
-        """Estimate the auxiliary block size from available memory."""
+
         nao = self.mol.nao_nr()
 
         available = max(
             0.0, self.max_memory - lib.current_memory()[0]
         ) * 1e6
 
-        # Approximate space for W and contraction intermediates.
-        bytes_per_q = 8 * (3 * nao**2 + 4 * nao * nvec)
+        bytes_per_q = 8 * (3 * nao**2 + 4 * nao * nvec) # this should be checked
 
-        return max(
-            1,
-            min(
-                int(self.block_nao),
-                int(0.8 * available / bytes_per_q),
-            ),
-        )
+        return max(1,
+                min(int(self.block_nao),
+                int(0.8 * available / bytes_per_q)))
 
     def build(self):
-        """Build density-independent C and W on disk; return self."""
+
         self._built = False
         self.dump_flags()
         log = logger.new_logger(self)
         t0 = (logger.process_clock(), logger.perf_counter())
         mol = self.mol
         self.auxmol = auxmol = df.addons.make_auxmol(mol, self.auxbasis)
+
+        atm_conc, bas_conc, env_conc = gto.mole.conc_env(
+            mol._atm, mol._bas, mol._env,
+            auxmol._atm, auxmol._bas, auxmol._env)
+
+
+        ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int2c3e_sph")
+
         ao_slices = mol.aoslice_by_atom()
         aux_slices = auxmol.aoslice_by_atom()
         nao, naux = mol.nao_nr(), auxmol.nao_nr()
 
-        # This is the only full auxiliary-space matrix held in memory.
+        env_conc = np.ascontiguousarray(env_conc, dtype=np.float64, order = 'C')
+        atm_conc = np.ascontiguousarray(atm_conc, dtype=np.int32, order = 'C')
+        bas_conc = np.ascontiguousarray(bas_conc, dtype=np.int32, order = 'C')
+        ao_loc_conc = np.ascontiguousarray(ao_loc_conc, dtype=np.int32, order = 'C')
+        ao_slices = np.ascontiguousarray(ao_slices, dtype=np.int32, order = 'C')
+        aux_slices = np.ascontiguousarray(aux_slices, dtype=np.int32, order = 'C')
+
         metric = auxmol.intor('int2c2e', hermi=1)
+        metric_factor = linalg.cho_factor(metric, lower=True, overwrite_a=False, check_finite=False)
+        self.metric = np.ascontiguousarray(metric, dtype = np.float64, order = 'C')
+        self.metric_factor = np.ascontiguousarray(metric_factor, dtype = np.float64, order = 'C')
 
-        with h5py.File(self._pari_file, 'w') as f:
-            f.attrs['format'] = 'pari'
-            f.attrs['complete'] = False
-            f['ao_slices'] = ao_slices
-            f['aux_slices'] = aux_slices
+        npair = int((mol.natm + 1) * mol.natm / 2)
 
-            f['metric'] = metric
-            groups = f.create_group('coeffs')
+        nao_per_atom = ao_slices[:, 3] - ao_slices[:, 2]
+        naux_per_atom = aux_slices[:, 3] - aux_slices[:, 2]
+        cab_per_pair_size = max(int(nao_per_atom.max()), int(naux_per_atom.max()))
+        cab = np.zeros(npair * cab_per_pair_size**3, dtype = np.float64, order = 'C')
 
-            # Fit each unordered atom pair only in its own auxiliary domain.
-            for A in range(mol.natm):
-                ash0, ash1, a0, a1 = ao_slices[A]
-                for B in range(A, mol.natm):
-                    bsh0, bsh1, b0, b1 = ao_slices[B]
-                    atoms = (A,) if A == B else (A, B)
-                    indices, integrals = [], []
-                    for atom in atoms:
-                        qsh0, qsh1, q0, q1 = aux_slices[atom]
-                        indices.append(np.arange(q0, q1))
-                        # Auxiliary shell numbers are relative to auxmol.
-                        integrals.append(df.incore.aux_e2(
-                            mol, auxmol, aosym='s1',
-                            shls_slice=(ash0, ash1, bsh0, bsh1, qsh0, qsh1)))
-                    aux_idx = np.concatenate(indices)
-                    ints = np.concatenate(integrals, axis=2)
-                    vlocal = metric[np.ix_(aux_idx, aux_idx)]
-                    rhs = ints.reshape(-1, len(aux_idx)).T
+        cab_offset = np.zeros(npair, dtype = np.int32, order = 'C')
+        libpari._local_coeff(self.metric.ctypes.c_void_p, cab.ctypes.c_void_p, cab_offset, cab_per_pair_size,
+                             atm_conc.ctypes.c_void_p, bas_conc.ctypes.c_void_p, env_conc.ctypes.c_void_p, ao_loc_conc.ctypes.c_void_p,
+                             ao_slices.ctypes.c_void_p, aux_slices.ctypes.c_void_p,
+                             mol.natm, mol.nbas,
+                             mol.natm+auxmol.natm, mol.nbas+auxmo.nbas,
+                             nao, naux)
 
-                    cab = linalg.solve(vlocal, rhs, assume_a='pos').T
-                    cab = cab.reshape(a1 - a0, b1 - b0, len(aux_idx))
+        self.cab = cab
+        self.cab_per_pair_size = cab_per_pair_size
+        self.cab_offset = cab_offset
 
-                    group = groups.create_group(f'{A}_{B}')
-                    group['aux_idx'] = aux_idx
-                    group['C'] = cab
-                    del integrals, ints, rhs, vlocal, cab
-            metric_factor = linalg.cho_factor(metric, lower=True, overwrite_a=True, check_finite=False)
 
-            jdata = f.create_dataset('J_coeff', shape=(nao, nao, naux), dtype='f8')
+        #for A in range(mol.natm):
+        #    ash0, ash1, a0, a1 = ao_slices[A]
+        #    for B in range(A, mol.natm):
+        #        bsh0, bsh1, b0, b1 = ao_slices[B]
+        #        atoms = (A,) if A == B else (A, B)
+        #        indices, integrals = [], []
+        #        for atom in atoms:
+        #            qsh0, qsh1, q0, q1 = aux_slices[atom]
+        #            indices.append(np.arange(q0, q1))
 
-            for sh0, sh1, a0, a1 in _aux_shell_blocks(mol, self.block_nao):
-                ints = df.incore.aux_e2(
-                    mol, auxmol, aosym='s1',
-                    shls_slice=(
-                        sh0, sh1,       # First orbital index: this block
-                        0, mol.nbas,   # Second orbital index: all AOs
-                        0, auxmol.nbas,  # All auxiliary functions
-                    ),
-                )
-                # ints.shape = (a1 - a0, nao, naux)
-                rhs = ints.reshape(-1, naux).T
+        #            integrals.append(df.incore.aux_e2(mol, auxmol, aosym='s1', shls_slice=(ash0, ash1, bsh0, bsh1, qsh0, qsh1))) # (\mu\nu | Q)
 
-                coeff = linalg.cho_solve(metric_factor, rhs, check_finite=False)
-                jdata[a0:a1, :, :] = coeff.T.reshape(a1 - a0, nao, naux)
+        #        aux_idx = np.concatenate(indices)
+        #        ints = np.concatenate(integrals, axis=2)
+        #        vlocal = metric[np.ix_(aux_idx, aux_idx)]
+        #        rhs = ints.reshape(-1, len(aux_idx)).T
 
-                del ints, rhs, coeff
+        #        cab = linalg.solve(vlocal, rhs, assume_a='pos').T
+        #        cab = cab.reshape(a1 - a0, b1 - b0, len(aux_idx))
 
-            f.attrs['complete'] = True
+        #        del integrals, ints, rhs, vlocal, cab
 
         self._built = True
         log.timer('PARI build', *t0)
         return self
 
-    def loop(self, blksize=None, dm=None, with_k=True):
-        """Yield (q0, q1, W_block, J_block).
+    def loop(self, blksize=None, dm=None, with_j = True, with_k=True):
 
-        dm=None skips J.
-        with_k=False skips construction of W.
-        """
         if not self._built:
             self.build()
 
         if blksize is None:
             blksize = self._block_size()
+
         blksize = int(blksize)
         if blksize < 1:
             raise ValueError('blksize must be positive')
 
         mol, auxmol = self.mol, self.auxmol
+
+        do_j = with_j and dm is not None
+
+        if do_j:
+            b = np.empty(auxmol.nao_nr())
+            for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
+                ints = df.incore.aux_e2(
+                    mol, auxmol, aosym='s1',
+                    shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
+                )
+                # ints.shape = (nao, nao, q1 - q0)
+                if dm is not None and with_j:
+                    b[q0:q1] = lib.einsum('ijq,ij->q', ints, dm)
+                    del ints
+            rho = linalg.cho_solve(self.metric_factor, b)
+            del b
 
         with h5py.File(self._pari_file, 'r') as f:
             ao_slices = f['ao_slices'][:]
@@ -202,24 +214,18 @@ class PARI(lib.StreamObject):
                     mol, auxmol, aosym='s1',
                     shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
                 )
-                # ints.shape = (nao, nao, q1 - q0)
 
-                # Standard DF Coulomb contribution from RAW integrals.
                 jblock = None
-                if dm is not None:
-                    rho = lib.einsum('ijq,ij->q', ints, dm)
-                    jcoeff = f['J_coeff'][:, :, q0:q1]
-                    jblock = lib.einsum('ijq,q->ij', jcoeff, rho)
-                    del jcoeff, rho
+                if do_j:
+                    jblock = lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
                 w = None
                 if with_k:
                     w = np.ascontiguousarray(ints.transpose(2, 0, 1))
-                del ints
 
                 if with_k:
                     # Read these columns once for all atom pairs.
-                    metric_block = f['metric'][:, q0:q1]
+                    metric_block = self.metric[:, q0:q1]
 
                     for A in range(mol.natm):
                         a0, a1 = ao_slices[A, 2:]
@@ -243,10 +249,11 @@ class PARI(lib.StreamObject):
 
                             del cab, correction
 
+
                     del metric_block
 
                 yield q0, q1, w, jblock
-                del w, jblock
+                del w 
 
 
     def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
@@ -278,6 +285,7 @@ class PARI(lib.StreamObject):
         vj = np.zeros((nao, nao)) if with_j else None
         vk = np.zeros((nao, nao)) if with_k else None
 
+
         if not np.any(dm):
             return vj, vk
 
@@ -292,13 +300,16 @@ class PARI(lib.StreamObject):
             nvec = m.shape[1]
 
         do_k = with_k and nvec > 0
-        if not with_j and not do_k:
+        do_j = with_j and dm is not None
+
+        if not do_j and not do_k:
             return vj, vk
 
         if not self._built:
             self.build()
 
         blksize = self._block_size(nvec=nvec)
+
         L = np.zeros((nao, nao)) if do_k else None
 
         with h5py.File(self._pari_file, 'r') as f:
@@ -306,11 +317,10 @@ class PARI(lib.StreamObject):
             groups = f['coeffs']
 
             for q0, q1, w, jblock in self.loop(
-                    blksize, dm=dm if with_j else None, with_k=do_k):
+                    blksize, dm=dm if with_j else None, with_j = do_j, with_k=do_k):
 
                 if with_j:
                     vj += jblock
-                del jblock
 
                 if not do_k:
                     continue
