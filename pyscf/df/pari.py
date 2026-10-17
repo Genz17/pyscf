@@ -15,6 +15,8 @@ from pyscf.df import DF
 from pyscf.ao2mo import _ao2mo
 from pyscf.ao2mo.incore import _conc_mos, iden_coeffs
 from pyscf.ao2mo.outcore import _load_from_h5g
+from pyscf import gto, scf
+import time
 from pyscf import __config__
 
 import ctypes
@@ -111,37 +113,40 @@ class PARI(lib.StreamObject):
             auxmol._atm, auxmol._bas, auxmol._env)
 
 
-        ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int2c3e_sph")
+        ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
 
         ao_slices = mol.aoslice_by_atom()
         aux_slices = auxmol.aoslice_by_atom()
         nao, naux = mol.nao_nr(), auxmol.nao_nr()
 
-        env_conc = np.ascontiguousarray(env_conc, dtype=np.float64, order = 'C')
-        atm_conc = np.ascontiguousarray(atm_conc, dtype=np.int32, order = 'C')
-        bas_conc = np.ascontiguousarray(bas_conc, dtype=np.int32, order = 'C')
-        ao_loc_conc = np.ascontiguousarray(ao_loc_conc, dtype=np.int32, order = 'C')
-        ao_slices = np.ascontiguousarray(ao_slices, dtype=np.int32, order = 'C')
-        aux_slices = np.ascontiguousarray(aux_slices, dtype=np.int32, order = 'C')
+        env_conc = np.ascontiguousarray(env_conc, dtype=np.float64)
+        atm_conc = np.ascontiguousarray(atm_conc, dtype=np.int32)
+        bas_conc = np.ascontiguousarray(bas_conc, dtype=np.int32)
+        ao_loc_conc = np.ascontiguousarray(ao_loc_conc, dtype=np.int32)
+        ao_slices = np.ascontiguousarray(ao_slices, dtype=np.int32)
+        aux_slices = np.ascontiguousarray(aux_slices, dtype=np.int32)
 
         metric = auxmol.intor('int2c2e', hermi=1)
         metric_factor = linalg.cho_factor(metric, lower=True, overwrite_a=False, check_finite=False)
-        self.metric = np.ascontiguousarray(metric, dtype = np.float64, order = 'C')
-        self.metric_factor = np.ascontiguousarray(metric_factor, dtype = np.float64, order = 'C')
+        self.metric = np.ascontiguousarray(metric, dtype = np.float64)
+        self.metric_factor = metric_factor
 
         npair = int((mol.natm + 1) * mol.natm / 2)
 
+
         nao_per_atom = ao_slices[:, 3] - ao_slices[:, 2]
         naux_per_atom = aux_slices[:, 3] - aux_slices[:, 2]
-        cab_per_pair_size = max(int(nao_per_atom.max()), int(naux_per_atom.max()))
-        cab = np.zeros(npair * cab_per_pair_size**3, dtype = np.float64, order = 'C')
+        max_nao = int(nao_per_atom.max())
+        max_naux = int(naux_per_atom.max())
+        cab_per_pair_size = max_nao**2 * (2 * max_naux)
+        cab = np.zeros(npair * cab_per_pair_size, dtype=np.float64)
 
         cab_offset = np.zeros(npair, dtype = np.int32, order = 'C')
-        libpari._local_coeff(self.metric.ctypes.c_void_p, cab.ctypes.c_void_p, cab_offset, cab_per_pair_size,
-                             atm_conc.ctypes.c_void_p, bas_conc.ctypes.c_void_p, env_conc.ctypes.c_void_p, ao_loc_conc.ctypes.c_void_p,
-                             ao_slices.ctypes.c_void_p, aux_slices.ctypes.c_void_p,
+        libpari._local_coeff(self.metric.ctypes.data_as(ctypes.c_void_p), cab.ctypes.data_as(ctypes.c_void_p), cab_offset.ctypes.data_as(ctypes.c_void_p), cab_per_pair_size,
+                             atm_conc.ctypes.data_as(ctypes.c_void_p), bas_conc.ctypes.data_as(ctypes.c_void_p), env_conc.ctypes.data_as(ctypes.c_void_p), ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
+                             ao_slices.ctypes.data_as(ctypes.c_void_p), aux_slices.ctypes.data_as(ctypes.c_void_p),
                              mol.natm, mol.nbas,
-                             mol.natm+auxmol.natm, mol.nbas+auxmo.nbas,
+                             mol.natm+auxmol.natm, mol.nbas+auxmol.nbas,
                              nao, naux)
 
         self.cab = cab
@@ -180,6 +185,9 @@ class PARI(lib.StreamObject):
         if not self._built:
             self.build()
 
+        ao_slices = self.mol.aoslice_by_atom()
+        aux_slices = self.auxmol.aoslice_by_atom()
+
         if blksize is None:
             blksize = self._block_size()
 
@@ -205,71 +213,70 @@ class PARI(lib.StreamObject):
             rho = linalg.cho_solve(self.metric_factor, b)
             del b
 
-        with h5py.File(self._pari_file, 'r') as f:
-            ao_slices = f['ao_slices'][:]
-            groups = f['coeffs']
+        for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
+            ints = df.incore.aux_e2(
+                mol, auxmol, aosym='s1',
+                shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
+            )
 
-            for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
-                ints = df.incore.aux_e2(
-                    mol, auxmol, aosym='s1',
-                    shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
-                )
+            jblock = None
+            if do_j:
+                jblock = lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
-                jblock = None
-                if do_j:
-                    jblock = lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
+            w = None
+            if with_k:
+                w = np.ascontiguousarray(ints.transpose(2, 0, 1))
 
-                w = None
-                if with_k:
-                    w = np.ascontiguousarray(ints.transpose(2, 0, 1))
+            if with_k:
+                # Read these columns once for all atom pairs.
+                metric_block = self.metric[:, q0:q1]
 
-                if with_k:
-                    # Read these columns once for all atom pairs.
-                    metric_block = self.metric[:, q0:q1]
+                for A in range(mol.natm):
+                    a0, a1 = ao_slices[A, 2:]
 
-                    for A in range(mol.natm):
-                        a0, a1 = ao_slices[A, 2:]
+                    for B in range(A, mol.natm):
+                        b0, b1 = ao_slices[B, 2:]
 
-                        for B in range(A, mol.natm):
-                            b0, b1 = ao_slices[B, 2:]
-                            group = groups[f'{A}_{B}']
-                            aux_idx = group['aux_idx'][:]
-                            cab = group['C'][:]
+                        cnt = int(A * (mol.natm + mol.natm - A + 1) / 2 + B - A)
+                        shift = cnt * self.cab_per_pair_size
+                        cab = self.cab[shift:shift+self.cab_offset[cnt]]
+                        cab = cab.reshape(a1-a0, b1 - b0, -1, order = 'F')
 
-                            correction = lib.einsum(
-                                'abr,rq->qab',
-                                cab, metric_block[aux_idx],
+
+                        atoms = (A,) if A == B else (A, B)
+                        indices = []
+                        for atom in atoms:
+                            indices.append(np.arange(aux_slices[atom][2], aux_slices[atom][3]))
+                        aux_idx = np.concatenate(indices)
+
+                        correction = lib.einsum(
+                            'abr,rq->qab',
+                            cab, metric_block[aux_idx],
+                        )
+
+                        w[:, a0:a1, b0:b1] -= 0.5 * correction
+                        if A != B:
+                            w[:, b0:b1, a0:a1] -= (
+                                0.5 * correction.transpose(0, 2, 1)
                             )
 
-                            w[:, a0:a1, b0:b1] -= 0.5 * correction
-                            if A != B:
-                                w[:, b0:b1, a0:a1] -= (
-                                    0.5 * correction.transpose(0, 2, 1)
-                                )
-
-                            del cab, correction
+                        del cab, correction
 
 
-                    del metric_block
+                del metric_block
 
-                yield q0, q1, w, jblock
-                del w 
+            yield q0, q1, w, jblock
+            del w 
 
 
     def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
                direct_scf_tol=1e-13, omega=None):
-        """Return standard DF J and PARI K for one real symmetric density.
 
-        direct_scf_tol is accepted for API compatibility; this implementation
-        does not apply density-based screening.
-        """
         if not with_j and not with_k:
             return None, None
 
         if omega not in (None, 0):
-            raise NotImplementedError(
-                'Range-separated J/K is not implemented here.'
-            )
+            raise NotImplementedError('Range-separated J/K is not implemented here.')
 
         dm = np.asarray(dm)
         nao = self.mol.nao_nr()
@@ -308,56 +315,66 @@ class PARI(lib.StreamObject):
         if not self._built:
             self.build()
 
+        ao_slices = self.mol.aoslice_by_atom()
+        aux_slices = self.auxmol.aoslice_by_atom()
+
         blksize = self._block_size(nvec=nvec)
 
         L = np.zeros((nao, nao)) if do_k else None
 
-        with h5py.File(self._pari_file, 'r') as f:
-            ao_slices = f['ao_slices'][:]
-            groups = f['coeffs']
+        for q0, q1, w, jblock in self.loop(
+                blksize, dm=dm if with_j else None, with_j = do_j, with_k=do_k):
 
-            for q0, q1, w, jblock in self.loop(
-                    blksize, dm=dm if with_j else None, with_j = do_j, with_k=do_k):
+            if with_j:
+                vj += jblock
 
-                if with_j:
-                    vj += jblock
+            if not do_k:
+                continue
 
-                if not do_k:
-                    continue
+            # d[Q, mu, i] = sum_lambda C[mu, lambda, Q] M[lambda, i]
+            d = np.zeros((q1 - q0, nao, nvec))
 
-                # d[Q, mu, i] = sum_lambda C[mu, lambda, Q] M[lambda, i]
-                d = np.zeros((q1 - q0, nao, nvec))
+            for A in range(self.mol.natm):
+                a0, a1 = ao_slices[A, 2:]
 
-                for A in range(self.mol.natm):
-                    a0, a1 = ao_slices[A, 2:]
+                for B in range(A, self.mol.natm):
+                    b0, b1 = ao_slices[B, 2:]
 
-                    for B in range(A, self.mol.natm):
-                        b0, b1 = ao_slices[B, 2:]
-                        group = groups[f'{A}_{B}']
-                        aux_idx = group['aux_idx'][:]
 
-                        mask = (aux_idx >= q0) & (aux_idx < q1)
-                        if not np.any(mask):
-                            continue
+                    atoms = (A,) if A == B else (A, B)
+                    indices = []
+                    for atom in atoms:
+                        indices.append(np.arange(aux_slices[atom][2], aux_slices[atom][3]))
+                    aux_idx = np.concatenate(indices)
 
-                        qlocal = aux_idx[mask] - q0
-                        cab = group['C'][:][:, :, mask]
+                    mask = (aux_idx >= q0) & (aux_idx < q1)
+                    if not np.any(mask):
+                        continue
 
-                        d[qlocal, a0:a1] += lib.einsum(
-                            'abq,bi->qai', cab, m[b0:b1],
+                    qlocal = aux_idx[mask] - q0
+
+
+                    cnt = int(A * (self.mol.natm + self.mol.natm - A + 1) / 2 + B - A)
+                    shift = cnt * self.cab_per_pair_size
+                    cab = self.cab[shift:shift+self.cab_offset[cnt]]
+                    cab = cab.reshape(a1-a0, b1 - b0, -1, order = 'F')
+                    cab = cab[:, :, mask]
+
+                    d[qlocal, a0:a1] += lib.einsum(
+                        'abq,bi->qai', cab, m[b0:b1],
+                    )
+                    if A != B:
+                        d[qlocal, b0:b1] += lib.einsum(
+                            'abq,ai->qbi', cab, m[a0:a1],
                         )
-                        if A != B:
-                            d[qlocal, b0:b1] += lib.einsum(
-                                'abq,ai->qbi', cab, m[a0:a1],
-                            )
 
-                        del cab
+                    del cab
 
-                h = lib.einsum('qns,si->qni', w, m)
-                h *= signs[None, None, :]
+            h = lib.einsum('qns,si->qni', w, m)
+            h *= signs[None, None, :]
 
-                L += lib.einsum('qmi,qni->mn', d, h)
-                del w, d, h
+            L += lib.einsum('qmi,qni->mn', d, h)
+            del w, d, h
 
         if do_k:
             vk = L + L.T
@@ -367,8 +384,6 @@ class PARI(lib.StreamObject):
 
 
 if __name__ == '__main__':
-    from pyscf import gto, scf
-    import time
 
     mol = gto.M(
         atom='O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587;',

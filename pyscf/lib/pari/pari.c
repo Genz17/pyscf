@@ -82,6 +82,8 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 	// cab is of size npair * (max_atm nao) * (max_atm nao)
 	// cab_offset is of size npair
 
+
+	#pragma omp parallel for schedule(dynamic, 1)
 	for (int A = 0; A < mol_natm; A++) {
 		for (int B = A; B < mol_natm; B++) {
 			int count = A * (mol_natm + mol_natm - A + 1) / 2 + B - A;
@@ -109,7 +111,7 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				cab_offset[count] = ao_A * ao_B * ao_aux;
 
 				for (int jj=0; jj < ao_A * ao_B * ao_aux; jj++) {
-					cab[cab_per_pair_size*count + jj] = out[jj]; // cab: F order, (na, nb, np)
+					cab[(size_t)cab_per_pair_size*count + jj] = out[jj]; // cab: F order, (na, nb, np)
 				}
 
 				free(out);
