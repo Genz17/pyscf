@@ -168,7 +168,8 @@ class PARI(lib.StreamObject):
         log.timer('PARI build', *t0)
         return self
 
-    def loop(self, blksize=None, dm=None, with_j = True, with_k=True):
+    def loop(self, blksize=None, vj = None,
+             dm=None, with_j = True, with_k=True):
 
         if not self._built:
             self.build()
@@ -240,9 +241,9 @@ class PARI(lib.StreamObject):
                 shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
             )
 
-            jblock = None
+            #jblock = None
             if do_j:
-                jblock = lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
+                vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
             w = None
             if with_k:
@@ -253,41 +254,13 @@ class PARI(lib.StreamObject):
                     self.cab.ctypes.data_as(ctypes.c_void_p), self.cab_per_pair_size, self.cab_offset.ctypes.data_as(ctypes.c_void_p),
                     w.ctypes.data_as(ctypes.c_void_p), mol.natm,
                     ao_slices.ctypes.data_as(ctypes.c_void_p),aux_slices.ctypes.data_as(ctypes.c_void_p), auxmol.nao_nr(), mol.nao_nr(),
-                    q0, q1,
-                )
-
-                #for A in range(mol.natm):
-                #    a0, a1 = ao_slices[A, 2:]
-
-                #    for B in range(A, mol.natm):
-                #        b0, b1 = ao_slices[B, 2:]
-
-                #        cnt = int(A * (mol.natm + mol.natm - A + 1) / 2 + B - A)
-                #        shift = cnt * self.cab_per_pair_size
-                #        cab = self.cab[shift:shift+self.cab_offset[cnt]]
-                #        cab = cab.reshape(a1-a0, b1 - b0, -1, order = 'F')
-
-                #        atoms = (A,) if A == B else (A, B)
-                #        indices = []
-                #        for atom in atoms:
-                #            indices.append(np.arange(aux_slices[atom][2], aux_slices[atom][3]))
-                #        aux_idx = np.concatenate(indices)
-
-                #        correction = lib.einsum('abr,rq->qab', cab, metric_block[aux_idx])
-
-                #        w[:, a0:a1, b0:b1] -= 0.5 * correction
-                #        if A != B:
-                #            w[:, b0:b1, a0:a1] -= (
-                #                0.5 * correction.transpose(0, 2, 1)
-                #            )
-
-                #        del cab, correction
+                    q0, q1)
 
 
                 del metric_block
 
-            yield q0, q1, w, jblock
             del w 
+        return
 
 
     def get_jk(self, dm, hermi=1, with_j=True, with_k=True,
@@ -354,53 +327,55 @@ class PARI(lib.StreamObject):
 
         L = np.zeros((nao, nao)) if do_k else None
 
-        for q0, q1, w, jblock in self.loop(
-                blksize, dm=dm if with_j else None, with_j = do_j, with_k=do_k):
+        self.loop(blksize, vj = vj,
+                  dm=dm if with_j else None, with_j = do_j, with_k=do_k)
 
-            if with_j:
-                vj += jblock
+        #for q0, q1, w, jblock in self.loop(blksize, dm=dm if with_j else None, with_j = do_j, with_k=do_k):
 
-            if not do_k:
-                continue
+        #    if with_j:
+        #        vj += jblock
 
-            # d[Q, mu, i] = sum_lambda C[mu, lambda, Q] M[lambda, i]
-            d = np.zeros((q1 - q0, nao, nvec))
+        #    if not do_k:
+        #        continue
 
-            for A in range(self.mol.natm):
-                a0, a1 = ao_slices[A, 2:]
+        #    # d[Q, mu, i] = sum_lambda C[mu, lambda, Q] M[lambda, i]
+        #    d = np.zeros((q1 - q0, nao, nvec))
 
-                for B in range(A, self.mol.natm):
-                    b0, b1 = ao_slices[B, 2:]
+        #    for A in range(self.mol.natm):
+        #        a0, a1 = ao_slices[A, 2:]
 
-
-                    atoms = (A,) if A == B else (A, B)
-                    indices = []
-                    for atom in atoms:
-                        indices.append(np.arange(aux_slices[atom][2], aux_slices[atom][3]))
-                    aux_idx = np.concatenate(indices)
-
-                    mask = (aux_idx >= q0) & (aux_idx < q1)
-                    if not np.any(mask):
-                        continue
-
-                    qlocal = aux_idx[mask] - q0
+        #        for B in range(A, self.mol.natm):
+        #            b0, b1 = ao_slices[B, 2:]
 
 
-                    cnt = int(A * (self.mol.natm + self.mol.natm - A + 1) / 2 + B - A)
-                    shift = cnt * self.cab_per_pair_size
-                    cab = self.cab[shift:shift+self.cab_offset[cnt]]
-                    cab = cab.reshape(a1-a0, b1 - b0, -1, order = 'F')
-                    cab = cab[:, :, mask]
+        #            atoms = (A,) if A == B else (A, B)
+        #            indices = []
+        #            for atom in atoms:
+        #                indices.append(np.arange(aux_slices[atom][2], aux_slices[atom][3]))
+        #            aux_idx = np.concatenate(indices)
 
-                    d[qlocal, a0:a1] += lib.einsum(
-                        'abq,bi->qai', cab, m[b0:b1],
-                    )
-                    if A != B:
-                        d[qlocal, b0:b1] += lib.einsum(
-                            'abq,ai->qbi', cab, m[a0:a1],
-                        )
+        #            mask = (aux_idx >= q0) & (aux_idx < q1)
+        #            if not np.any(mask):
+        #                continue
 
-                    del cab
+        #            qlocal = aux_idx[mask] - q0
+
+
+        #            cnt = int(A * (self.mol.natm + self.mol.natm - A + 1) / 2 + B - A)
+        #            shift = cnt * self.cab_per_pair_size
+        #            cab = self.cab[shift:shift+self.cab_offset[cnt]]
+        #            cab = cab.reshape(a1-a0, b1 - b0, -1, order = 'F')
+        #            cab = cab[:, :, mask]
+
+        #            d[qlocal, a0:a1] += lib.einsum(
+        #                'abq,bi->qai', cab, m[b0:b1],
+        #            )
+        #            if A != B:
+        #                d[qlocal, b0:b1] += lib.einsum(
+        #                    'abq,ai->qbi', cab, m[a0:a1],
+        #                )
+
+        #            del cab
 
             h = lib.einsum('qns,si->qni', w, m)
             h *= signs[None, None, :]

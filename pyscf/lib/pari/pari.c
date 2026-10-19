@@ -215,9 +215,10 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 }
 
 
-int _loop_k_wbuild(double *metric_block, 
+int _loop_k_wdbuild(double *metric_block, 
 				   double *cab, int cab_per_pair_size, int *cab_offset,
-				   double *w, int mol_natm,
+				   double *m, double *w, double *d, 
+				   int mol_natm, int nocc,
 				   int *ao_slice, int *aux_slice, int naux, int nao,
 				   int aux_q0, int aux_q1) {
 
@@ -264,22 +265,38 @@ int _loop_k_wbuild(double *metric_block,
 			for (int a = 0; a < ao_A; a++) {
 				for (int b = 0; b < ao_B; b++) {
 					for (int aa = 0; aa < ao_aux; aa++) {
-						double c = -0.5 * cabnow[
-							a + (size_t)ao_A * (b + (size_t)ao_B * aa)
-						];
+
+						double c = -0.5 * cabnow[a + (size_t)ao_A * (b + (size_t)ao_B * aa)];
+
+						if (aux_idx[aa] >= aux_q0 && aux_idx[aa] < aux_q1) {
+							size_t qoff = (size_t)(aux_idx[aa] - aux_q0) * nao * nocc;
+
+							for (int iocc = 0; iocc < nocc; iocc++) {
+								size_t ia = (size_t)(a0 + a) * nocc + iocc;
+								size_t ib = (size_t)(b0 + b) * nocc + iocc;
+
+								#pragma omp atomic update
+								d[qoff + ia] += -2.0 * c * m[ib];
+
+								if (A != B) {
+									#pragma omp atomic update
+									d[qoff + ib] += -2.0 * c * m[ia];
+								}
+							}
+						}
+
 
 						for (int q = 0; q < nq; q++) {
-							double temp = c * metric_block[
-								(size_t)aux_idx[aa] * naux + q
-							];
+							double temp = c * metric_block[(size_t)aux_idx[aa] * naux + q];
 
-							w[((size_t)q * nao + a0 + a) * nao + b0 + b]
-								+= temp;
+
+							w[((size_t)q * nao + a0 + a) * nao + b0 + b] += temp;
 
 							if (A != B) {
-								w[((size_t)q * nao + b0 + b) * nao + a0 + a]
-									+= temp;
+								w[((size_t)q * nao + b0 + b) * nao + a0 + a] += temp;
 							}
+
+
 						}
 					}
 				}
@@ -292,4 +309,16 @@ int _loop_k_wbuild(double *metric_block,
 
 
 	return 0;
+}
+
+
+int _get_jk_k_build() {
+
+
+	for (int A = 0; A < mol_natm; A++) {
+		for (int B = 0; B < mol_natm; B++) {
+			if (B < A) continue;
+		}
+	}
+
 }
