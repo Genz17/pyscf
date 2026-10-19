@@ -58,7 +58,7 @@ class PARI(lib.StreamObject):
         self.stdout = mol.stdout
         self.verbose = mol.verbose
         self.max_memory = mol.max_memory
-        self.block_nao = 1200
+        self.block_nao = 32
         self._built = False
 
     def dump_flags(self, verbose=None):
@@ -168,8 +168,8 @@ class PARI(lib.StreamObject):
         log.timer('PARI build', *t0)
         return self
 
-    def loop(self, blksize=None, vj = None,
-             dm=None, with_j = True, with_k=True):
+    def loop(self, blksize=None, vj = None, L = None, signs = None,
+             dm=None, m = None, with_j = True, with_k=True):
 
         if not self._built:
             self.build()
@@ -248,18 +248,25 @@ class PARI(lib.StreamObject):
             w = None
             if with_k:
                 w = np.ascontiguousarray(ints.transpose(2, 0, 1))
+                m = np.ascontiguousarray(m, dtype = np.float64)
+                d = np.ascontiguousarray(np.zeros((q1 - q0, mol.nao_nr(), m.shape[-1])), dtype=np.float64)
+                nocc = m.shape[-1]
                 metric_block = self.metric[:, q0:q1]
 
-                libpari._loop_k_wbuild(metric_block.ctypes.data_as(ctypes.c_void_p),
-                    self.cab.ctypes.data_as(ctypes.c_void_p), self.cab_per_pair_size, self.cab_offset.ctypes.data_as(ctypes.c_void_p),
-                    w.ctypes.data_as(ctypes.c_void_p), mol.natm,
-                    ao_slices.ctypes.data_as(ctypes.c_void_p),aux_slices.ctypes.data_as(ctypes.c_void_p), auxmol.nao_nr(), mol.nao_nr(),
-                    q0, q1)
+                libpari._loop_k_wdbuild(
+                                metric_block.ctypes.data_as(ctypes.c_void_p),
+                                self.cab.ctypes.data_as(ctypes.c_void_p), self.cab_per_pair_size, self.cab_offset.ctypes.data_as(ctypes.c_void_p),
+                                m.ctypes.data_as(ctypes.c_void_p), w.ctypes.data_as(ctypes.c_void_p), d.ctypes.data_as(ctypes.c_void_p),
+                                mol.natm, nocc,
+                                ao_slices.ctypes.data_as(ctypes.c_void_p),aux_slices.ctypes.data_as(ctypes.c_void_p), auxmol.nao_nr(), mol.nao_nr(),
+                                q0, q1)
 
+                h = lib.einsum('qns,si->qni', w, m)
+                h *= signs[None, None, :]
+                L += lib.einsum('qmi,qni->mn', d, h)
 
                 del metric_block
-
-            del w 
+                del w 
         return
 
 
@@ -302,7 +309,6 @@ class PARI(lib.StreamObject):
                 m = mo_coeff[:, keep] * np.sqrt(mo_occ[keep])
                 signs = np.ones(m.shape[1])
             else:
-                # General input: an untagged density or density difference.
                 eig, vec = linalg.eigh(dm)
                 cutoff = np.finfo(float).eps * nao * np.max(np.abs(eig))
                 keep = np.abs(eig) > cutoff
@@ -327,61 +333,12 @@ class PARI(lib.StreamObject):
 
         L = np.zeros((nao, nao)) if do_k else None
 
-        self.loop(blksize, vj = vj,
-                  dm=dm if with_j else None, with_j = do_j, with_k=do_k)
-
-        #for q0, q1, w, jblock in self.loop(blksize, dm=dm if with_j else None, with_j = do_j, with_k=do_k):
-
-        #    if with_j:
-        #        vj += jblock
-
-        #    if not do_k:
-        #        continue
-
-        #    # d[Q, mu, i] = sum_lambda C[mu, lambda, Q] M[lambda, i]
-        #    d = np.zeros((q1 - q0, nao, nvec))
-
-        #    for A in range(self.mol.natm):
-        #        a0, a1 = ao_slices[A, 2:]
-
-        #        for B in range(A, self.mol.natm):
-        #            b0, b1 = ao_slices[B, 2:]
-
-
-        #            atoms = (A,) if A == B else (A, B)
-        #            indices = []
-        #            for atom in atoms:
-        #                indices.append(np.arange(aux_slices[atom][2], aux_slices[atom][3]))
-        #            aux_idx = np.concatenate(indices)
-
-        #            mask = (aux_idx >= q0) & (aux_idx < q1)
-        #            if not np.any(mask):
-        #                continue
-
-        #            qlocal = aux_idx[mask] - q0
-
-
-        #            cnt = int(A * (self.mol.natm + self.mol.natm - A + 1) / 2 + B - A)
-        #            shift = cnt * self.cab_per_pair_size
-        #            cab = self.cab[shift:shift+self.cab_offset[cnt]]
-        #            cab = cab.reshape(a1-a0, b1 - b0, -1, order = 'F')
-        #            cab = cab[:, :, mask]
-
-        #            d[qlocal, a0:a1] += lib.einsum(
-        #                'abq,bi->qai', cab, m[b0:b1],
-        #            )
-        #            if A != B:
-        #                d[qlocal, b0:b1] += lib.einsum(
-        #                    'abq,ai->qbi', cab, m[a0:a1],
-        #                )
-
-        #            del cab
-
-            h = lib.einsum('qns,si->qni', w, m)
-            h *= signs[None, None, :]
-
-            L += lib.einsum('qmi,qni->mn', d, h)
-            del w, d, h
+        self.loop(
+            blksize, vj=vj, L=L,
+            signs=signs if do_k else None,
+            dm=dm if do_j else None,
+            m=m if do_k else None,
+            with_j=do_j, with_k=do_k)
 
         if do_k:
             vk = L + L.T

@@ -214,111 +214,339 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 	return 0;
 }
 
+//
+//int _loop_k_wdbuild(double *metric_block, 
+//				   double *cab, int cab_per_pair_size, int *cab_offset,
+//				   double *m, double *w, double *d, 
+//				   int mol_natm, int nocc,
+//				   int *ao_slice, int *aux_slice, int naux, int nao,
+//				   int aux_q0, int aux_q1) {
+//
+//	#pragma omp parallel for collapse(2) schedule(dynamic, 1)
+//	for (int A = 0; A < mol_natm; A++) {
+//		for (int B = 0; B < mol_natm; B++) {
+//			if (B < A) continue;
+//
+//			int count = A * (mol_natm + mol_natm - A + 1) / 2 + B - A;
+//			size_t shift = (size_t)count * cab_per_pair_size;
+//			double *cabnow = cab + shift;
+//			int ao_A = ao_slice[4*A+3] - ao_slice[4*A+2];
+//			int ao_B = ao_slice[4*B+3] - ao_slice[4*B+2];
+//
+//			int ao_aux;
+//			int *aux_idx;
+//
+//			if (A == B) {
+//				ao_aux = aux_slice[4*A+3] - aux_slice[4*A+2];
+//				aux_idx = malloc(sizeof(int) * ao_aux);
+//				for (int ii=0; ii < ao_aux; ii++) {
+//					aux_idx[ii] = aux_slice[4*A+2] + ii;
+//				}	
+//			} else {
+//				int ao_aux_A = aux_slice[4*A+3] - aux_slice[4*A+2];
+//				int ao_aux_B = aux_slice[4*B+3] - aux_slice[4*B+2];
+//				ao_aux = ao_aux_A + ao_aux_B;
+//
+//				aux_idx = malloc(sizeof(int) * (ao_aux_A + ao_aux_B));
+//
+//				for (int ii=0; ii < ao_aux_A + ao_aux_B; ii++) {
+//					if (ii < ao_aux_A) {
+//						aux_idx[ii] = aux_slice[4*A+2] + ii;
+//					} else {
+//						aux_idx[ii] = aux_slice[4*B+2] + ii - ao_aux_A;
+//					}
+//				}	
+//			}
+//
+//			int nq = aux_q1 - aux_q0;
+//			int a0 = ao_slice[4*A+2];
+//			int b0 = ao_slice[4*B+2];
+//
+//			for (int a = 0; a < ao_A; a++) {
+//				for (int b = 0; b < ao_B; b++) {
+//					for (int aa = 0; aa < ao_aux; aa++) {
+//
+//						double c = -0.5 * cabnow[a + (size_t)ao_A * (b + (size_t)ao_B * aa)];
+//
+//						if (aux_idx[aa] >= aux_q0 && aux_idx[aa] < aux_q1) {
+//							size_t qoff = (size_t)(aux_idx[aa] - aux_q0) * nao * nocc;
+//
+//							for (int iocc = 0; iocc < nocc; iocc++) {
+//								size_t ia = (size_t)(a0 + a) * nocc + iocc;
+//								size_t ib = (size_t)(b0 + b) * nocc + iocc;
+//
+//								#pragma omp atomic update
+//								d[qoff + ia] += -2.0 * c * m[ib];
+//
+//								if (A != B) {
+//									#pragma omp atomic update
+//									d[qoff + ib] += -2.0 * c * m[ia];
+//								}
+//							}
+//						}
+//
+//
+//						for (int q = 0; q < nq; q++) {
+//							double temp = c * metric_block[(size_t)aux_idx[aa] * naux + q];
+//
+//
+//							w[((size_t)q * nao + a0 + a) * nao + b0 + b] += temp;
+//
+//							if (A != B) {
+//								w[((size_t)q * nao + b0 + b) * nao + a0 + a] += temp;
+//							}
+//
+//
+//						}
+//					}
+//				}
+//			}
+//
+//			free(aux_idx);
+//
+//		}
+//	}
+//
+//
+//	return 0;
+//}
 
-int _loop_k_wdbuild(double *metric_block, 
-				   double *cab, int cab_per_pair_size, int *cab_offset,
-				   double *m, double *w, double *d, 
-				   int mol_natm, int nocc,
-				   int *ao_slice, int *aux_slice, int naux, int nao,
-				   int aux_q0, int aux_q1) {
+typedef struct {
+    const double *coeff;
+    int a0, b0, na, nb, nab;
+    int p0, np, r0, nr;
+} PARILoopPair;
 
-#pragma omp parallel for collapse(2) schedule(dynamic, 1)
-	for (int A = 0; A < mol_natm; A++) {
-		for (int B = 0; B < mol_natm; B++) {
-			if (B < A) continue;
+int _loop_k_wdbuild(double *metric_block,
+                   double *cab, int cab_per_pair_size, int *cab_offset,
+                   double *m, double *w, double *d,
+                   int mol_natm, int nocc,
+                   int *ao_slice, int *aux_slice, int naux, int nao,
+                   int aux_q0, int aux_q1)
+{
+    if (mol_natm < 0 || nao < 0 || naux < 0 || nocc < 0 ||
+        aux_q0 < 0 || aux_q1 < aux_q0 || aux_q1 > naux ||
+        cab_per_pair_size < 0) {
+        return 1;
+    }
 
-			int count = A * (mol_natm + mol_natm - A + 1) / 2 + B - A;
-			size_t shift = (size_t)count * cab_per_pair_size;
-			double *cabnow = cab + shift;
-			int ao_A = ao_slice[4*A+3] - ao_slice[4*A+2];
-			int ao_B = ao_slice[4*B+3] - ao_slice[4*B+2];
+    const int nq = aux_q1 - aux_q0;
+    if (nq == 0 || mol_natm == 0 || nao == 0) return 0;
 
-			int ao_aux;
-			int *aux_idx;
+    /* Prepare immutable atom-pair descriptors. */
+    const size_t capacity =
+        (size_t)mol_natm * ((size_t)mol_natm + 1) / 2;
 
-			if (A == B) {
-				ao_aux = aux_slice[4*A+3] - aux_slice[4*A+2];
-				aux_idx = malloc(sizeof(int) * ao_aux);
-				for (int ii=0; ii < ao_aux; ii++) {
-					aux_idx[ii] = aux_slice[4*A+2] + ii;
-				}	
-			} else {
-				int ao_aux_A = aux_slice[4*A+3] - aux_slice[4*A+2];
-				int ao_aux_B = aux_slice[4*B+3] - aux_slice[4*B+2];
-				ao_aux = ao_aux_A + ao_aux_B;
+    PARILoopPair *pairs = malloc(capacity * sizeof(*pairs));
+    if (pairs == NULL) return 2;
 
-				aux_idx = malloc(sizeof(int) * (ao_aux_A + ao_aux_B));
+    size_t count = 0, used = 0;
+    int max_nab = 0, max_nlocal = 0;
 
-				for (int ii=0; ii < ao_aux_A + ao_aux_B; ii++) {
-					if (ii < ao_aux_A) {
-						aux_idx[ii] = aux_slice[4*A+2] + ii;
-					} else {
-						aux_idx[ii] = aux_slice[4*B+2] + ii - ao_aux_A;
-					}
-				}	
-			}
+    for (int A = 0; A < mol_natm; A++) {
+        for (int B = A; B < mol_natm; B++, count++) {
+            PARILoopPair pair;
 
-			int nq = aux_q1 - aux_q0;
-			int a0 = ao_slice[4*A+2];
-			int b0 = ao_slice[4*B+2];
+            pair.a0 = ao_slice[4*A+2];
+            pair.b0 = ao_slice[4*B+2];
+            pair.na = ao_slice[4*A+3] - pair.a0;
+            pair.nb = ao_slice[4*B+3] - pair.b0;
 
-			for (int a = 0; a < ao_A; a++) {
-				for (int b = 0; b < ao_B; b++) {
-					for (int aa = 0; aa < ao_aux; aa++) {
+            pair.p0 = aux_slice[4*A+2];
+            pair.r0 = aux_slice[4*B+2];
+            pair.np = aux_slice[4*A+3] - pair.p0;
+            pair.nr = A == B ? 0 : aux_slice[4*B+3] - pair.r0;
 
-						double c = -0.5 * cabnow[a + (size_t)ao_A * (b + (size_t)ao_B * aa)];
+            if (pair.na == 0 || pair.nb == 0) continue;
 
-						if (aux_idx[aa] >= aux_q0 && aux_idx[aa] < aux_q1) {
-							size_t qoff = (size_t)(aux_idx[aa] - aux_q0) * nao * nocc;
+            const int nlocal = pair.np + pair.nr;
+            if (nlocal == 0) continue;
 
-							for (int iocc = 0; iocc < nocc; iocc++) {
-								size_t ia = (size_t)(a0 + a) * nocc + iocc;
-								size_t ib = (size_t)(b0 + b) * nocc + iocc;
+            pair.nab = pair.na * pair.nb;
+            const size_t required = (size_t)pair.nab * nlocal;
 
-								#pragma omp atomic update
-								d[qoff + ia] += -2.0 * c * m[ib];
+            if (required > (size_t)cab_per_pair_size ||
+                cab_offset[count] < 0 ||
+                required != (size_t)cab_offset[count]) {
+                free(pairs);
+                return 1;
+            }
 
-								if (A != B) {
-									#pragma omp atomic update
-									d[qoff + ib] += -2.0 * c * m[ia];
-								}
-							}
-						}
+            pair.coeff = cab + count * (size_t)cab_per_pair_size;
+            pairs[used++] = pair;
 
+            if (pair.nab > max_nab) max_nab = pair.nab;
+            if (nlocal > max_nlocal) max_nlocal = nlocal;
+        }
+    }
 
-						for (int q = 0; q < nq; q++) {
-							double temp = c * metric_block[(size_t)aux_idx[aa] * naux + q];
+    if (used == 0) {
+        free(pairs);
+        return 0;
+    }
 
+    int nthreads = omp_get_max_threads();
+    if (nthreads > nq) nthreads = nq;
 
-							w[((size_t)q * nao + a0 + a) * nao + b0 + b] += temp;
+    int tile = 1 + (nq - 1) / nthreads;
+    if (tile > 16) tile = 16;
 
-							if (A != B) {
-								w[((size_t)q * nao + b0 + b) * nao + a0 + a] += temp;
-							}
+    /*
+     * Each thread needs only packed metric and correction buffers
+     * for one tile, rather than a private copy of d.
+     */
+    const size_t metric_size = (size_t)max_nlocal * tile;
+    const size_t scratch_size =
+        metric_size + (size_t)max_nab * tile;
 
+    double *scratch = malloc(
+        (size_t)nthreads * scratch_size * sizeof(*scratch));
 
-						}
-					}
-				}
-			}
+    if (scratch == NULL) {
+        free(pairs);
+        return 2;
+    }
 
-			free(aux_idx);
+    /*
+     * Each q belongs to exactly one thread.
+     * All atom-pair contributions to w[q] and d[q] are accumulated
+     * by that thread, so no atomic updates are needed.
+     */
+#pragma omp parallel num_threads(nthreads)
+    {
+        double *vlocal =
+            scratch + (size_t)omp_get_thread_num() * scratch_size;
+        double *correction = vlocal + metric_size;
 
-		}
-	}
+        const double one = 1.0;
+        const double zero = 0.0;
+        const double minus_half = -0.5;
 
+#pragma omp for schedule(dynamic, 1)
+        for (int qb = 0; qb < nq; qb += tile) {
+            const int nt = nq - qb < tile ? nq - qb : tile;
 
-	return 0;
-}
+            for (size_t ipair = 0; ipair < used; ipair++) {
+                const PARILoopPair *pair = pairs + ipair;
 
+                const int na = pair->na;
+                const int nb = pair->nb;
+                const int nab = pair->nab;
+                const int nlocal = pair->np + pair->nr;
 
-int _get_jk_k_build() {
+                /*
+                 * Pack V[P,q] into column-major (nlocal, nt).
+                 *
+                 * metric_block is the Python view
+                 * self.metric[:, aux_q0:aux_q1].
+                 * Its row stride remains naux doubles.
+                 */
+                for (int iq = 0; iq < nt; iq++) {
+                    double *column = vlocal + (size_t)iq * nlocal;
 
+                    for (int p = 0; p < pair->np; p++) {
+                        column[p] = metric_block[
+                            (size_t)(pair->p0 + p) * naux + qb + iq];
+                    }
 
-	for (int A = 0; A < mol_natm; A++) {
-		for (int B = 0; B < mol_natm; B++) {
-			if (B < A) continue;
-		}
-	}
+                    for (int p = 0; p < pair->nr; p++) {
+                        column[pair->np + p] = metric_block[
+                            (size_t)(pair->r0 + p) * naux + qb + iq];
+                    }
+                }
 
+                /*
+                 * correction[ab,q] = -0.5 * C[ab,P] * V[P,q]
+                 *
+                 * C:          column-major (nab, nlocal)
+                 * V:          column-major (nlocal, nt)
+                 * correction: column-major (nab, nt)
+                 */
+                dgemm_("N", "N",
+                       &nab, &nt, &nlocal,
+                       &minus_half,
+                       pair->coeff, &nab,
+                       vlocal, &nlocal,
+                       &zero,
+                       correction, &nab);
+
+                for (int iq = 0; iq < nt; iq++) {
+                    const int q = qb + iq;
+                    const double *wc =
+                        correction + (size_t)iq * nab;
+                    double *wq = w + (size_t)q * nao * nao;
+
+                    /* Scatter the pair correction into row-major w. */
+                    for (int a = 0; a < na; a++) {
+                        for (int b = 0; b < nb; b++) {
+                            const double value =
+                                wc[a + (size_t)na * b];
+
+                            wq[(size_t)(pair->a0 + a) * nao
+                               + pair->b0 + b] += value;
+
+                            if (pair->a0 != pair->b0) {
+                                wq[(size_t)(pair->b0 + b) * nao
+                                   + pair->a0 + a] += value;
+                            }
+                        }
+                    }
+
+                    if (nocc == 0) continue;
+
+                    /*
+                     * d receives a contribution only if this global q
+                     * belongs to the pair's local auxiliary basis.
+                     */
+                    const int global_q = aux_q0 + q;
+                    int local_q;
+
+                    if (global_q >= pair->p0 &&
+                        global_q < pair->p0 + pair->np) {
+                        local_q = global_q - pair->p0;
+                    } else if (global_q >= pair->r0 &&
+                               global_q < pair->r0 + pair->nr) {
+                        local_q =
+                            pair->np + global_q - pair->r0;
+                    } else {
+                        continue;
+                    }
+
+                    const double *cq =
+                        pair->coeff + (size_t)local_q * nab;
+                    double *dq = d + (size_t)q * nao * nocc;
+
+                    /*
+                     * Cq is column-major (na, nb).
+                     * Row-major M and D are viewed as column-major
+                     * matrices with shape (nocc, nao).
+                     *
+                     * D_A^T += M_B^T * Cq^T
+                     */
+                    dgemm_("N", "T",
+                           &nocc, &na, &nb,
+                           &one,
+                           m + (size_t)pair->b0 * nocc, &nocc,
+                           cq, &na,
+                           &one,
+                           dq + (size_t)pair->a0 * nocc, &nocc);
+
+                    /* D_B^T += M_A^T * Cq */
+                    if (pair->a0 != pair->b0) {
+                        dgemm_("N", "N",
+                               &nocc, &nb, &na,
+                               &one,
+                               m + (size_t)pair->a0 * nocc, &nocc,
+                               cq, &na,
+                               &one,
+                               dq + (size_t)pair->b0 * nocc, &nocc);
+                    }
+                }
+            }
+        }
+    }
+
+    free(scratch);
+    free(pairs);
+    return 0;
 }
