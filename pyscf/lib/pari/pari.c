@@ -322,23 +322,13 @@ int _loop_k_wdbuild(double *metric_block,
                    double *m, double *w, double *d,
                    int mol_natm, int nocc,
                    int *ao_slice, int *aux_slice, int naux, int nao,
-                   int aux_q0, int aux_q1)
-{
-    if (mol_natm < 0 || nao < 0 || naux < 0 || nocc < 0 ||
-        aux_q0 < 0 || aux_q1 < aux_q0 || aux_q1 > naux ||
-        cab_per_pair_size < 0) {
-        return 1;
-    }
-
+                   int aux_q0, int aux_q1) {
     const int nq = aux_q1 - aux_q0;
-    if (nq == 0 || mol_natm == 0 || nao == 0) return 0;
 
-    /* Prepare immutable atom-pair descriptors. */
-    const size_t capacity =
-        (size_t)mol_natm * ((size_t)mol_natm + 1) / 2;
+	// atom pair capacity (A, B)
+    const size_t capacity = (size_t)mol_natm * ((size_t)mol_natm + 1) / 2;
 
     PARILoopPair *pairs = malloc(capacity * sizeof(*pairs));
-    if (pairs == NULL) return 2;
 
     size_t count = 0, used = 0;
     int max_nab = 0, max_nlocal = 0;
@@ -357,10 +347,7 @@ int _loop_k_wdbuild(double *metric_block,
             pair.np = aux_slice[4*A+3] - pair.p0;
             pair.nr = A == B ? 0 : aux_slice[4*B+3] - pair.r0;
 
-            if (pair.na == 0 || pair.nb == 0) continue;
-
             const int nlocal = pair.np + pair.nr;
-            if (nlocal == 0) continue;
 
             pair.nab = pair.na * pair.nb;
             const size_t required = (size_t)pair.nab * nlocal;
@@ -380,49 +367,36 @@ int _loop_k_wdbuild(double *metric_block,
         }
     }
 
-    if (used == 0) {
-        free(pairs);
-        return 0;
-    }
-
     int nthreads = omp_get_max_threads();
     if (nthreads > nq) nthreads = nq;
 
     int tile = 1 + (nq - 1) / nthreads;
-    if (tile > 16) tile = 16;
+    //if (tile > 16) tile = 16;
 
     /*
      * Each thread needs only packed metric and correction buffers
      * for one tile, rather than a private copy of d.
      */
     const size_t metric_size = (size_t)max_nlocal * tile;
-    const size_t scratch_size =
-        metric_size + (size_t)max_nab * tile;
+    const size_t scratch_size = metric_size + (size_t)max_nab * tile;
 
-    double *scratch = malloc(
-        (size_t)nthreads * scratch_size * sizeof(*scratch));
-
-    if (scratch == NULL) {
-        free(pairs);
-        return 2;
-    }
+    double *scratch = malloc((size_t)nthreads * scratch_size * sizeof(*scratch));
 
     /*
      * Each q belongs to exactly one thread.
      * All atom-pair contributions to w[q] and d[q] are accumulated
      * by that thread, so no atomic updates are needed.
      */
-#pragma omp parallel num_threads(nthreads)
+	#pragma omp parallel num_threads(nthreads)
     {
-        double *vlocal =
-            scratch + (size_t)omp_get_thread_num() * scratch_size;
+        double *vlocal = scratch + (size_t)omp_get_thread_num() * scratch_size;
         double *correction = vlocal + metric_size;
 
         const double one = 1.0;
         const double zero = 0.0;
         const double minus_half = -0.5;
 
-#pragma omp for schedule(dynamic, 1)
+		#pragma omp for schedule(dynamic, 1)
         for (int qb = 0; qb < nq; qb += tile) {
             const int nt = nq - qb < tile ? nq - qb : tile;
 
@@ -434,24 +408,20 @@ int _loop_k_wdbuild(double *metric_block,
                 const int nab = pair->nab;
                 const int nlocal = pair->np + pair->nr;
 
-                /*
-                 * Pack V[P,q] into column-major (nlocal, nt).
-                 *
-                 * metric_block is the Python view
-                 * self.metric[:, aux_q0:aux_q1].
-                 * Its row stride remains naux doubles.
-                 */
+                
+                //Pack V[P,q] into column-major (nlocal, nt).
+                 
                 for (int iq = 0; iq < nt; iq++) {
                     double *column = vlocal + (size_t)iq * nlocal;
 
                     for (int p = 0; p < pair->np; p++) {
-                        column[p] = metric_block[
-                            (size_t)(pair->p0 + p) * naux + qb + iq];
+						column[p] = metric_block[
+							(size_t)(pair->p0 + p) * nq + qb + iq];
                     }
 
                     for (int p = 0; p < pair->nr; p++) {
                         column[pair->np + p] = metric_block[
-                            (size_t)(pair->r0 + p) * naux + qb + iq];
+                            (size_t)(pair->r0 + p) * nq + qb + iq];
                     }
                 }
 
@@ -548,5 +518,128 @@ int _loop_k_wdbuild(double *metric_block,
 
     free(scratch);
     free(pairs);
+    return 0;
+}
+
+int _loop_j_bbuild(
+    double *b, const double *dm, const double *ao_mnmn,
+    const double *aux_bound, const int *ao_slice, const int *ao_loc,
+    int mol_natm, int mol_nbas,
+    int *atm, int natm, int *bas, int nbas, double *env,
+    CINTOpt *opt, double tol)
+{
+    const int nao = ao_loc[mol_nbas];
+    const int naux = ao_loc[nbas] - nao;
+    const int naux_shells = nbas - mol_nbas;
+
+    memset(b, 0, (size_t)naux * sizeof(*b));
+    if (nao == 0 || naux == 0) return 0;
+
+    double *bounds = malloc(
+        (size_t)mol_natm * mol_natm * sizeof(*bounds));
+    if (bounds == NULL) return 1;
+
+    /* Compute each atom-pair screening bound once. */
+    for (int A = 0; A < mol_natm; A++) {
+        for (int B = A; B < mol_natm; B++) {
+            double qab = 0.0, dm_sum = 0.0;
+
+            for (int i = ao_slice[4*A]; i < ao_slice[4*A+1]; i++)
+                for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++)
+                    qab = fmax(
+                        qab, ao_mnmn[(size_t)i * mol_nbas + j]);
+
+            for (int i = ao_slice[4*A+2]; i < ao_slice[4*A+3]; i++)
+                for (int j = ao_slice[4*B+2]; j < ao_slice[4*B+3]; j++)
+                    dm_sum += fabs(dm[(size_t)i * nao + j]);
+
+            bounds[(size_t)A * mol_natm + B] =
+                (A == B ? 1.0 : 2.0) * qab * dm_sum;
+        }
+    }
+
+    /* Allocate one integral buffer and libcint cache per thread. */
+    int max_ao = 0, max_aux = 0;
+    for (int s = 0; s < mol_nbas; s++) {
+        int dim = ao_loc[s+1] - ao_loc[s];
+        if (dim > max_ao) max_ao = dim;
+    }
+    for (int s = mol_nbas; s < nbas; s++) {
+        int dim = ao_loc[s+1] - ao_loc[s];
+        if (dim > max_aux) max_aux = dim;
+    }
+
+    int slices[6] = {0, mol_nbas, 0, mol_nbas, mol_nbas, nbas};
+    size_t cache_size = GTOmax_cache_size(
+        int3c2e_sph, slices, 3, atm, natm, bas, nbas, env);
+    size_t buf_size = (size_t)max_ao * max_ao * max_aux;
+    size_t stride = buf_size + cache_size;
+
+    int nthreads = omp_get_max_threads();
+    if (nthreads > naux_shells) nthreads = naux_shells;
+
+    double *work = malloc(
+        (size_t)nthreads * stride * sizeof(*work));
+    if (work == NULL) {
+        free(bounds);
+        return 1;
+    }
+
+    #pragma omp parallel num_threads(nthreads)
+    {
+        double *buf = work + (size_t)omp_get_thread_num() * stride;
+        double *cache = buf + buf_size;
+
+        #pragma omp for schedule(dynamic, 1)
+        for (int k = mol_nbas; k < nbas; k++) {
+            int dk = ao_loc[k+1] - ao_loc[k];
+            double *bk = b + ao_loc[k] - nao;
+            double qbound = aux_bound[k - mol_nbas];
+
+            for (int A = 0; A < mol_natm; A++) {
+                for (int B = A; B < mol_natm; B++) {
+                    if (bounds[(size_t)A * mol_natm + B]
+                        * qbound < tol)
+                        continue;
+
+                    double factor = A == B ? 1.0 : 2.0;
+
+                    for (int j = ao_slice[4*B];
+                         j < ao_slice[4*B+1]; j++) {
+                        int dj = ao_loc[j+1] - ao_loc[j];
+
+                        for (int i = ao_slice[4*A];
+                             i < ao_slice[4*A+1]; i++) {
+                            int di = ao_loc[i+1] - ao_loc[i];
+                            int shls[3] = {i, j, k};
+
+                            if (!int3c2e_sph(
+                                    buf, NULL, shls,
+                                    atm, natm, bas, nbas,
+                                    env, opt, cache))
+                                continue;
+
+                            /* Integral layout: (di, dj, dk), Fortran order. */
+                            for (int q = 0; q < dk; q++) {
+                                double value = 0.0;
+                                for (int jj = 0; jj < dj; jj++)
+                                    for (int ii = 0; ii < di; ii++)
+                                        value +=
+                                            dm[(size_t)(ao_loc[i]+ii) * nao
+                                               + ao_loc[j]+jj]
+                                            * buf[ii + (size_t)di
+                                                  * (jj + dj*q)];
+
+                                bk[q] += factor * value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    free(work);
+    free(bounds);
     return 0;
 }
