@@ -101,6 +101,46 @@ static void int3c2e_masked(double *out, int *shls_slice, int *loc, CINTOpt *opt,
     free(cache);
 }
 
+void int3c2e_masked_parallelized(double *out, int *shls_slice, int *loc, CINTOpt *opt,
+							 int *atm, int natm, int *bas, int nbas, double *env,
+							 const uint8_t *mask, int mol_nbas) {
+    int dims[3] = {loc[shls_slice[1]] - loc[shls_slice[0]],
+                   loc[shls_slice[3]] - loc[shls_slice[2]],
+                   loc[shls_slice[5]] - loc[shls_slice[4]]};
+    size_t n_munu = (size_t)dims[0] * dims[1];
+
+    memset(out, 0, n_munu * dims[2] * sizeof(*out));
+
+    size_t ncache = GTOmax_cache_size(int3c2e_sph, shls_slice, 3, atm, natm, bas, nbas, env);
+    double *cache = malloc(ncache * sizeof(*cache));
+
+	#pragma omp parallel 
+	{
+		double *cache = malloc(ncache * sizeof(*cache));
+		#pragma omp for collapse(2) schedule(dynamic, 1)
+		for (int j = shls_slice[2]; j < shls_slice[3]; j++) {
+			for (int i = shls_slice[0]; i < shls_slice[1]; i++) {
+				if (!mask[(size_t)i * mol_nbas + j]) continue;
+
+				size_t ij =
+					(loc[i] - loc[shls_slice[0]]) +
+					(size_t)dims[0] * (loc[j] - loc[shls_slice[2]]);
+
+				for (int k = shls_slice[4]; k < shls_slice[5]; k++) {
+					int shls[3] = {i, j, k};
+					size_t offset =
+						ij + n_munu * (loc[k] - loc[shls_slice[4]]);
+
+					int3c2e_sph(out + offset, dims, shls,
+							   atm, natm, bas, nbas, env, opt, cache);
+				}
+			}
+		}
+
+		free(cache);
+	}
+}
+
 
 int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_size,
 				 int *atm_conc, int *bas_conc, double *env_conc, int *ao_loc_conc,
@@ -108,10 +148,11 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				 int *ao_slice, int *aux_slice,
 				 int mol_natm, int mol_nbas, 
 				 int conc_natm, int conc_nbas,
-				 int nao, int naux) {
+				 int nao, int naux, 
+				 CINTOpt *opt, double tol) {
 
 
-	CINTOpt *opt = NULL;
+	//CINTOpt *opt = NULL;
 	int3c2e_optimizer(&opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc);
 
 	// npair: natm * (natm + 1) / 2
@@ -124,8 +165,28 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 		for (int B = 0; B < mol_natm; B++) {
 			if (B < A) continue;
 			int count = A * (mol_natm + mol_natm - A + 1) / 2 + B - A;
+			
+			int keep_pair = 0;
+
+			for (int i = ao_slice[4*A]; i < ao_slice[4*A+1] && !keep_pair; i++) {
+				for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++) {
+					if (schwarz_mask[(size_t)i * mol_nbas + j]) {
+						keep_pair = 1;
+						break;
+					}
+				}
+			}
+
+			if (!keep_pair) {
+				cab_offset[count] = 0;
+				continue;
+			}
+
+
+
 			int ao_A = ao_slice[4*A+3] - ao_slice[4*A+2];
 			int ao_B = ao_slice[4*B+3] - ao_slice[4*B+2];
+
 
 			if (A == B) {
 				int shls_slice[6] = {ao_slice[4*A], ao_slice[4*A+1],
@@ -205,7 +266,7 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 			}
 		}
 	}
-	CINTdel_optimizer(&opt);
+	//CINTdel_optimizer(&opt);
 	return 0;
 }
 
@@ -335,6 +396,11 @@ int _loop_k_wdbuild(double *metric_block,
 	// pair construction
     for (int A = 0; A < mol_natm; A++) {
         for (int B = A; B < mol_natm; B++, count++) {
+
+			if (cab_offset[count] == 0) {
+				continue;
+			}
+
             PARILoopPair pair;
 
             pair.a0 = ao_slice[4*A+2];
@@ -365,15 +431,10 @@ int _loop_k_wdbuild(double *metric_block,
     int tile = 1 + (nq - 1) / nthreads; // tile = ceil(nq/nthreads), s.t. nthreads * tile >= nq
 
     const size_t metric_size = (size_t)max_nlocal * tile;
-    const size_t scratch_size = metric_size + (size_t)max_nab * tile;
+    const size_t scratch_size = fmax(1, metric_size + (size_t)max_nab * tile);
 
     double *scratch = malloc((size_t)nthreads * scratch_size * sizeof(double));
 
-    /*
-     * Each q belongs to exactly one thread.
-     * All atom-pair contributions to w[q] and d[q] are accumulated
-     * by that thread, so no atomic updates are needed.
-     */
 	#pragma omp parallel num_threads(nthreads)
     {
         double *vlocal = scratch + (size_t)omp_get_thread_num() * scratch_size; // V = (P|Q), where Q is specified by the current thread

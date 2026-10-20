@@ -150,19 +150,21 @@ class PARI(lib.StreamObject):
         cab = np.zeros(npair * cab_per_pair_size, dtype=np.float64)
 
         cab_offset = np.zeros(npair, dtype = np.int32, order = 'C')
+        self.cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, "int3c2e_sph")
+
         libpari._local_coeff(self.metric.ctypes.data_as(ctypes.c_void_p), cab.ctypes.data_as(ctypes.c_void_p), cab_offset.ctypes.data_as(ctypes.c_void_p), cab_per_pair_size,
                              atm_conc.ctypes.data_as(ctypes.c_void_p), bas_conc.ctypes.data_as(ctypes.c_void_p), env_conc.ctypes.data_as(ctypes.c_void_p), ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
                              self.schwarz_mask.ctypes.data_as(ctypes.c_void_p),
                              ao_slices.ctypes.data_as(ctypes.c_void_p), aux_slices.ctypes.data_as(ctypes.c_void_p),
                              mol.natm, mol.nbas,
                              mol.natm+auxmol.natm, mol.nbas+auxmol.nbas,
-                             nao, naux)
+                             nao, naux,
+                             self.cintopt, ctypes.c_double(self.tol))
 
         self.cab = cab
         self.cab_per_pair_size = cab_per_pair_size
         self.cab_offset = cab_offset
 
-        self.cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, "int3c2e_sph")
 
         self._built = True
         log.timer('PARI build', *t0)
@@ -236,16 +238,17 @@ class PARI(lib.StreamObject):
         #    rho = linalg.cho_solve(self.metric_factor, b)
         #    del b
 
+        atm_conc, bas_conc, env_conc = gto.mole.conc_env(
+            mol._atm, mol._bas, mol._env,
+            auxmol._atm, auxmol._bas, auxmol._env,
+        )
+        ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
+
         if do_j:
             j_tol = self.tol
             dm = np.ascontiguousarray(dm, dtype=np.float64)
             b = np.zeros(auxmol.nao_nr())
 
-            atm_conc, bas_conc, env_conc = gto.mole.conc_env(
-                mol._atm, mol._bas, mol._env,
-                auxmol._atm, auxmol._bas, auxmol._env,
-            )
-            ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
 
             aux_bound = np.empty(auxmol.nbas, dtype=np.float64)
             for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
@@ -274,20 +277,33 @@ class PARI(lib.StreamObject):
 
 
         for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
-            ints = df.incore.aux_e2(
-                mol, auxmol, aosym='s2ij', cintopt=self.cintopt,
-                shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
-            )
+            #ints = df.incore.aux_e2(
+            #    mol, auxmol, aosym='s2ij', cintopt=self.cintopt,
+            #    shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
+            #)
+
+            ints = np.empty((mol.nao_nr(), mol.nao_nr(), q1 - q0), dtype = np.float64, order = 'F')
+            shls_slice = np.ascontiguousarray([0, mol.nbas, 0, mol.nbas, mol.nbas + sh0, mol.nbas + sh1], dtype = np.int32)
+            libpari.int3c2e_masked_parallelized(ints.ctypes.data_as(ctypes.c_void_p), shls_slice.ctypes.data_as(ctypes.c_void_p),
+                                                ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
+                                                self.cintopt,
+                                                atm_conc.ctypes.data_as(ctypes.c_void_p), mol.natm + auxmol.natm,
+                                                bas_conc.ctypes.data_as(ctypes.c_void_p),
+                                                mol.nbas + auxmol.nbas,
+                                                env_conc.ctypes.data_as(ctypes.c_void_p),
+                                                self.schwarz_mask.ctypes.data_as(ctypes.c_void_p),
+                                                mol.nbas
+                                                )
 
             #jblock = None
             if do_j:
-                vj += lib.unpack_tril(ints @ rho[q0:q1])
-                #vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
+                #vj += lib.unpack_tril(ints @ rho[q0:q1])
+                vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
             w = None
             if with_k:
-                w = lib.unpack_tril(np.ascontiguousarray(ints.T))
-                #w = np.ascontiguousarray(ints.transpose(2, 0, 1))
+                #w = lib.unpack_tril(np.ascontiguousarray(ints.T))
+                w = np.ascontiguousarray(ints.transpose(2, 0, 1))
                 m = np.ascontiguousarray(m, dtype = np.float64)
                 d = np.ascontiguousarray(np.zeros((q1 - q0, mol.nao_nr(), m.shape[-1])), dtype=np.float64)
                 nocc = m.shape[-1]
@@ -303,8 +319,8 @@ class PARI(lib.StreamObject):
                                 q0, q1)
 
                 #h = lib.einsum('qns,si->qni', w, m)
-                h *= signs[None, None, :]
-                L += lib.einsum('qmi,qni->mn', d, h)
+                #h *= signs[None, None, :]
+                L += lib.einsum('qmi,qni,i->mn', d, h, signs)
 
                 del metric_block
                 del w 
@@ -395,7 +411,7 @@ if __name__ == '__main__':
         O 30 0 0; H 30 -0.757 0.587; H 30 0.757 0.587; \
         ',
         basis='ccpvtz', verbose=4)
-    mol.max_memory = 3
+    mol.max_memory = 300
     mf = scf.RKS(mol)
     mf.xc = 'b3lyp'
 
