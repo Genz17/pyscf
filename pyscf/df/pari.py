@@ -58,7 +58,7 @@ class PARI(lib.StreamObject):
         self.stdout = mol.stdout
         self.verbose = mol.verbose
         self.max_memory = mol.max_memory
-        self.block_nao = 32
+        self.block_nao = 16
         self._built = False
 
     def dump_flags(self, verbose=None):
@@ -429,32 +429,30 @@ if __name__ == '__main__':
         O 70 0 0; H 70 -0.757 0.587; H 70 0.757 0.587; \
         O 80 0 0; H 80 -0.757 0.587; H 80 0.757 0.587; \
         ',
-        basis='ccpvdz', verbose=4)
-    mol.max_memory = 500
-    mf = scf.RKS(mol)
-    mf.xc = 'b3lyp'
+        basis='ccpvtz', verbose=4)
+    #mol.max_memory = 100
+    mf = scf.RHF(mol)
 
     #s = time.perf_counter()
     #mf.kernel()
     #e = time.perf_counter()
     #print("NO DF: %.5f" % (e-s))
 
-    mf = scf.RKS(mol).density_fit()
-    mf.with_df = PARI(mol, auxbasis = "ccpvdz-jkfit")
-    mf.xc = 'b3lyp'
+    mf = scf.RHF(mol).density_fit()
+    mf.with_df = PARI(mol, auxbasis = "ccpvtz-jkfit")
+    mf.with_df.max_memory = 100
     s = time.perf_counter()
     mf.kernel()
     e = time.perf_counter()
     print("PARI: %.5f" % (e-s))
 
-    #mf = scf.RKS(mol).density_fit()
-    #mf.with_df = DF(mol, auxbasis = "ccpvdz-jkfit")
-    #mf.xc = 'b3lyp'
-    #s = time.perf_counter()
-    #mf.kernel()
-    #e = time.perf_counter()
-    #print("DF: %.5f" % (e-s))
-    #dm = mf.make_rdm1()  # Includes the RHF factor of two in the occupations.
+    mf = scf.RHF(mol).density_fit()
+    mf.with_df = DF(mol, auxbasis = "ccpvdz-jkfit")
+    mf.with_df.max_memory = 100
+    s = time.perf_counter()
+    mf.kernel()
+    e = time.perf_counter()
+    print("DF: %.5f" % (e-s))
 
     #pari = PARI(mol, auxbasis='ccpvqz-jkfit')
     #pari.set(blockdim=32).build()
