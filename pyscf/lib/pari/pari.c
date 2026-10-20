@@ -119,7 +119,7 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 	// cab_offset is of size npair
 
 
-#pragma omp parallel for collapse(2) schedule(dynamic, 1)
+	#pragma omp parallel for collapse(2) schedule(dynamic, 1)
 	for (int A = 0; A < mol_natm; A++) {
 		for (int B = 0; B < mol_natm; B++) {
 			if (B < A) continue;
@@ -139,9 +139,6 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				}	
 
 				double *out = malloc((size_t)ao_A * ao_B * ao_aux * sizeof(double)); // (\mu\nu| Q) eris, sorted by ao inx
-
-				//GTOnr3c_drv(int3c2e_sph, GTOnr3c_fill_s1, out, 1, shls_slice, ao_loc_conc, opt,
-				//			atm_conc, conc_natm, bas_conc, conc_nbas, env_conc);
 
 
 				int3c2e_masked(out, shls_slice, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas);
@@ -185,8 +182,6 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				double *out_B = malloc((size_t)ao_A * ao_B * ao_aux_B * sizeof(double)); // (\mu\nu| Q) eris, sorted by ao inx
 				double *out = malloc((size_t)ao_A * ao_B * ao_aux * sizeof(double));
 
-				//GTOnr3c_drv(int3c2e_sph, GTOnr3c_fill_s1, out_A, 1, shls_slice_A, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc);
-				//GTOnr3c_drv(int3c2e_sph, GTOnr3c_fill_s1, out_B, 1, shls_slice_B, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc);
 				int3c2e_masked(out_A, shls_slice_A, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas);
 				int3c2e_masked(out_B, shls_slice_B, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas);
 
@@ -319,11 +314,12 @@ typedef struct {
 
 int _loop_k_wdbuild(double *metric_block,
                    double *cab, int cab_per_pair_size, int *cab_offset,
-                   double *m, double *w, double *d,
+                   double *m, double *w, double *d, double *h,
                    int mol_natm, int nocc,
                    int *ao_slice, int *aux_slice, int naux, int nao,
                    int aux_q0, int aux_q1) {
-    const int nq = aux_q1 - aux_q0;
+
+    const int nq = aux_q1 - aux_q0; // number of aux AOs that we want to handle here in each loop
 
 	// atom pair capacity (A, B)
     const size_t capacity = (size_t)mol_natm * ((size_t)mol_natm + 1) / 2;
@@ -333,6 +329,10 @@ int _loop_k_wdbuild(double *metric_block,
     size_t count = 0, used = 0;
     int max_nab = 0, max_nlocal = 0;
 
+	// max_nab: largest (\mu, \nu) pair for one atom pair
+	// max_nlocal: biggest possible aux ao associated with one atom pair
+
+	// pair construction
     for (int A = 0; A < mol_natm; A++) {
         for (int B = A; B < mol_natm; B++, count++) {
             PARILoopPair pair;
@@ -350,14 +350,6 @@ int _loop_k_wdbuild(double *metric_block,
             const int nlocal = pair.np + pair.nr;
 
             pair.nab = pair.na * pair.nb;
-            const size_t required = (size_t)pair.nab * nlocal;
-
-            if (required > (size_t)cab_per_pair_size ||
-                cab_offset[count] < 0 ||
-                required != (size_t)cab_offset[count]) {
-                free(pairs);
-                return 1;
-            }
 
             pair.coeff = cab + count * (size_t)cab_per_pair_size;
             pairs[used++] = pair;
@@ -370,17 +362,12 @@ int _loop_k_wdbuild(double *metric_block,
     int nthreads = omp_get_max_threads();
     if (nthreads > nq) nthreads = nq;
 
-    int tile = 1 + (nq - 1) / nthreads;
-    //if (tile > 16) tile = 16;
+    int tile = 1 + (nq - 1) / nthreads; // tile = ceil(nq/nthreads), s.t. nthreads * tile >= nq
 
-    /*
-     * Each thread needs only packed metric and correction buffers
-     * for one tile, rather than a private copy of d.
-     */
     const size_t metric_size = (size_t)max_nlocal * tile;
     const size_t scratch_size = metric_size + (size_t)max_nab * tile;
 
-    double *scratch = malloc((size_t)nthreads * scratch_size * sizeof(*scratch));
+    double *scratch = malloc((size_t)nthreads * scratch_size * sizeof(double));
 
     /*
      * Each q belongs to exactly one thread.
@@ -389,8 +376,8 @@ int _loop_k_wdbuild(double *metric_block,
      */
 	#pragma omp parallel num_threads(nthreads)
     {
-        double *vlocal = scratch + (size_t)omp_get_thread_num() * scratch_size;
-        double *correction = vlocal + metric_size;
+        double *vlocal = scratch + (size_t)omp_get_thread_num() * scratch_size; // V = (P|Q), where Q is specified by the current thread
+        double *correction = vlocal + metric_size; // metric = (\mu \nu|Q) where Q is specified by the current thread
 
         const double one = 1.0;
         const double zero = 0.0;
@@ -398,11 +385,13 @@ int _loop_k_wdbuild(double *metric_block,
 
 		#pragma omp for schedule(dynamic, 1)
         for (int qb = 0; qb < nq; qb += tile) {
-            const int nt = nq - qb < tile ? nq - qb : tile;
+			// each thread takes one qb, and run over that tile
+
+            const int nt = nq - qb < tile ? nq - qb : tile; // to deal with the last portion
 
             for (size_t ipair = 0; ipair < used; ipair++) {
-                const PARILoopPair *pair = pairs + ipair;
 
+                const PARILoopPair *pair = pairs + ipair;
                 const int na = pair->na;
                 const int nb = pair->nb;
                 const int nab = pair->nab;
@@ -412,16 +401,15 @@ int _loop_k_wdbuild(double *metric_block,
                 //Pack V[P,q] into column-major (nlocal, nt).
                  
                 for (int iq = 0; iq < nt; iq++) {
+					// iq: specified the current aux ao
                     double *column = vlocal + (size_t)iq * nlocal;
 
                     for (int p = 0; p < pair->np; p++) {
-						column[p] = metric_block[
-							(size_t)(pair->p0 + p) * nq + qb + iq];
+						column[p] = metric_block[(size_t)(pair->p0 + p) * nq + qb + iq];
                     }
 
                     for (int p = 0; p < pair->nr; p++) {
-                        column[pair->np + p] = metric_block[
-                            (size_t)(pair->r0 + p) * nq + qb + iq];
+                        column[pair->np + p] = metric_block[(size_t)(pair->r0 + p) * nq + qb + iq];
                     }
                 }
 
@@ -432,6 +420,7 @@ int _loop_k_wdbuild(double *metric_block,
                  * V:          column-major (nlocal, nt)
                  * correction: column-major (nab, nt)
                  */
+
                 dgemm_("N", "N",
                        &nab, &nt, &nlocal,
                        &minus_half,
@@ -440,29 +429,24 @@ int _loop_k_wdbuild(double *metric_block,
                        &zero,
                        correction, &nab);
 
+				// apply correction
                 for (int iq = 0; iq < nt; iq++) {
-                    const int q = qb + iq;
-                    const double *wc =
-                        correction + (size_t)iq * nab;
+                    const int q = qb + iq; // this is the index within the input aux_q0 to aux_q1
+                    const double *wc = correction + (size_t)iq * nab;
                     double *wq = w + (size_t)q * nao * nao;
 
                     /* Scatter the pair correction into row-major w. */
                     for (int a = 0; a < na; a++) {
                         for (int b = 0; b < nb; b++) {
-                            const double value =
-                                wc[a + (size_t)na * b];
+                            const double value = wc[a + (size_t)na * b];
 
-                            wq[(size_t)(pair->a0 + a) * nao
-                               + pair->b0 + b] += value;
+                            wq[(size_t)(pair->a0 + a) * nao + pair->b0 + b] += value;
 
                             if (pair->a0 != pair->b0) {
-                                wq[(size_t)(pair->b0 + b) * nao
-                                   + pair->a0 + a] += value;
+                                wq[(size_t)(pair->b0 + b) * nao + pair->a0 + a] += value;
                             }
                         }
                     }
-
-                    if (nocc == 0) continue;
 
                     /*
                      * d receives a contribution only if this global q
@@ -471,19 +455,15 @@ int _loop_k_wdbuild(double *metric_block,
                     const int global_q = aux_q0 + q;
                     int local_q;
 
-                    if (global_q >= pair->p0 &&
-                        global_q < pair->p0 + pair->np) {
+                    if (global_q >= pair->p0 && global_q < pair->p0 + pair->np) {
                         local_q = global_q - pair->p0;
-                    } else if (global_q >= pair->r0 &&
-                               global_q < pair->r0 + pair->nr) {
-                        local_q =
-                            pair->np + global_q - pair->r0;
+                    } else if (global_q >= pair->r0 && global_q < pair->r0 + pair->nr) {
+                        local_q = pair->np + global_q - pair->r0;
                     } else {
                         continue;
                     }
 
-                    const double *cq =
-                        pair->coeff + (size_t)local_q * nab;
+                    const double *cq = pair->coeff + (size_t)local_q * nab;
                     double *dq = d + (size_t)q * nao * nocc;
 
                     /*
@@ -513,6 +493,17 @@ int _loop_k_wdbuild(double *metric_block,
                     }
                 }
             }
+
+			const int ncols = nt * nao;
+
+			dgemm_("N", "N",
+			   &nocc, &ncols, &nao,
+			   &one,
+			   m, &nocc,
+			   w + (size_t)qb * nao * nao, &nao,
+			   &zero,
+			   h + (size_t)qb * nao * nocc, &nocc);
+
         }
     }
 
@@ -532,12 +523,9 @@ int _loop_j_bbuild(
     const int naux = ao_loc[nbas] - nao;
     const int naux_shells = nbas - mol_nbas;
 
-    memset(b, 0, (size_t)naux * sizeof(*b));
-    if (nao == 0 || naux == 0) return 0;
+    memset(b, 0, (size_t)naux * sizeof(*b)); // b = (\lambda \sigma|Q) D_{\lambda \sigma}, Q: all aux AOs
 
-    double *bounds = malloc(
-        (size_t)mol_natm * mol_natm * sizeof(*bounds));
-    if (bounds == NULL) return 1;
+    double *bounds = malloc((size_t)mol_natm * mol_natm * sizeof(*double));
 
     /* Compute each atom-pair screening bound once. */
     for (int A = 0; A < mol_natm; A++) {
@@ -546,15 +534,13 @@ int _loop_j_bbuild(
 
             for (int i = ao_slice[4*A]; i < ao_slice[4*A+1]; i++)
                 for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++)
-                    qab = fmax(
-                        qab, ao_mnmn[(size_t)i * mol_nbas + j]);
+                    qab = fmax(qab, ao_mnmn[(size_t)i * mol_nbas + j]);
 
             for (int i = ao_slice[4*A+2]; i < ao_slice[4*A+3]; i++)
                 for (int j = ao_slice[4*B+2]; j < ao_slice[4*B+3]; j++)
                     dm_sum += fabs(dm[(size_t)i * nao + j]);
 
-            bounds[(size_t)A * mol_natm + B] =
-                (A == B ? 1.0 : 2.0) * qab * dm_sum;
+            bounds[(size_t)A * mol_natm + B] = (A == B ? 1.0 : 2.0) * qab * dm_sum;
         }
     }
 
@@ -570,20 +556,14 @@ int _loop_j_bbuild(
     }
 
     int slices[6] = {0, mol_nbas, 0, mol_nbas, mol_nbas, nbas};
-    size_t cache_size = GTOmax_cache_size(
-        int3c2e_sph, slices, 3, atm, natm, bas, nbas, env);
+    size_t cache_size = GTOmax_cache_size(int3c2e_sph, slices, 3, atm, natm, bas, nbas, env);
     size_t buf_size = (size_t)max_ao * max_ao * max_aux;
     size_t stride = buf_size + cache_size;
 
     int nthreads = omp_get_max_threads();
     if (nthreads > naux_shells) nthreads = naux_shells;
 
-    double *work = malloc(
-        (size_t)nthreads * stride * sizeof(*work));
-    if (work == NULL) {
-        free(bounds);
-        return 1;
-    }
+    double *work = malloc((size_t)nthreads * stride * sizeof(*work));
 
     #pragma omp parallel num_threads(nthreads)
     {

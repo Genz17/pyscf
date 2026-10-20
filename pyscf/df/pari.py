@@ -190,87 +190,87 @@ class PARI(lib.StreamObject):
 
         do_j = with_j and dm is not None
 
-        #if do_j:
-        #    # this part needs to be moved to C
-        #    j_tol = self.tol  # Set to zero to disable this screening.
-
-        #    pairs = []
-        #    for A in range(mol.natm):
-        #        i0, i1, a0, a1 = ao_slices[A]
-
-        #        for B in range(A, mol.natm):
-        #            j0, j1, b0, b1 = ao_slices[B]
-        #            if a0 == a1 or b0 == b1:
-        #                continue
-
-        #            dm_ab = dm[a0:a1, b0:b1]
-        #            factor = 1 if A == B else 2
-        #            qab = self.ao_mnmn[i0:i1, j0:j1].max()
-        #            bound = factor * qab * np.abs(dm_ab).sum()
-
-        #            pairs.append(
-        #                (i0, i1, j0, j1, dm_ab, factor, bound)
-        #            )
-
-
-        #    b = np.zeros(auxmol.nao_nr())
-
-        #    for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
-        #        aux_bound = self.aux_PP[sh0:sh1].max()
-
-        #        for i0, i1, j0, j1, dm_ab, factor, bound in pairs:
-        #            if bound * aux_bound < j_tol:
-        #                continue
-
-        #            ints = df.incore.aux_e2(
-        #                mol, auxmol,
-        #                aosym="s1",
-        #                cintopt=self.cintopt,
-        #                shls_slice=(i0, i1, j0, j1, sh0, sh1),
-        #            )
-        #            b[q0:q1] += factor * lib.einsum(
-        #                "ijq,ij->q", ints, dm_ab
-        #            )
-        #            del ints
-
-        #    rho = linalg.cho_solve(self.metric_factor, b)
-        #    del b
-
         if do_j:
-            j_tol = self.tol
-            dm = np.ascontiguousarray(dm, dtype=np.float64)
+            # this part needs to be moved to C
+            j_tol = self.tol  # Set to zero to disable this screening.
+
+            pairs = []
+            for A in range(mol.natm):
+                i0, i1, a0, a1 = ao_slices[A]
+
+                for B in range(A, mol.natm):
+                    j0, j1, b0, b1 = ao_slices[B]
+                    if a0 == a1 or b0 == b1:
+                        continue
+
+                    dm_ab = dm[a0:a1, b0:b1]
+                    factor = 1 if A == B else 2
+                    qab = self.ao_mnmn[i0:i1, j0:j1].max()
+                    bound = factor * qab * np.abs(dm_ab).sum()
+
+                    pairs.append(
+                        (i0, i1, j0, j1, dm_ab, factor, bound)
+                    )
+
+
             b = np.zeros(auxmol.nao_nr())
 
-            atm_conc, bas_conc, env_conc = gto.mole.conc_env(
-                mol._atm, mol._bas, mol._env,
-                auxmol._atm, auxmol._bas, auxmol._env,
-            )
-            ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
-
-            aux_bound = np.empty(auxmol.nbas, dtype=np.float64)
             for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
-                aux_bound[sh0:sh1] = self.aux_PP[sh0:sh1].max()
+                aux_bound = self.aux_PP[sh0:sh1].max()
 
-            if libpari._loop_j_bbuild(
-                b.ctypes.data_as(ctypes.c_void_p),
-                dm.ctypes.data_as(ctypes.c_void_p),
-                self.ao_mnmn.ctypes.data_as(ctypes.c_void_p),
-                aux_bound.ctypes.data_as(ctypes.c_void_p),
-                ao_slices.ctypes.data_as(ctypes.c_void_p),
-                ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
-                mol.natm, mol.nbas,
-                atm_conc.ctypes.data_as(ctypes.c_void_p),
-                mol.natm + auxmol.natm,
-                bas_conc.ctypes.data_as(ctypes.c_void_p),
-                mol.nbas + auxmol.nbas,
-                env_conc.ctypes.data_as(ctypes.c_void_p),
-                self.cintopt,
-                ctypes.c_double(j_tol),
-            ):
-                raise MemoryError("Failed to allocate J-build workspace")
+                for i0, i1, j0, j1, dm_ab, factor, bound in pairs:
+                    if bound * aux_bound < j_tol:
+                        continue
+
+                    ints = df.incore.aux_e2(
+                        mol, auxmol,
+                        aosym="s1",
+                        cintopt=self.cintopt,
+                        shls_slice=(i0, i1, j0, j1, sh0, sh1),
+                    )
+                    b[q0:q1] += factor * lib.einsum(
+                        "ijq,ij->q", ints, dm_ab
+                    )
+                    del ints
 
             rho = linalg.cho_solve(self.metric_factor, b)
             del b
+
+        #if do_j:
+        #    j_tol = self.tol
+        #    dm = np.ascontiguousarray(dm, dtype=np.float64)
+        #    b = np.zeros(auxmol.nao_nr())
+
+        #    atm_conc, bas_conc, env_conc = gto.mole.conc_env(
+        #        mol._atm, mol._bas, mol._env,
+        #        auxmol._atm, auxmol._bas, auxmol._env,
+        #    )
+        #    ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
+
+        #    aux_bound = np.empty(auxmol.nbas, dtype=np.float64)
+        #    for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
+        #        aux_bound[sh0:sh1] = self.aux_PP[sh0:sh1].max()
+
+        #    if libpari._loop_j_bbuild(
+        #        b.ctypes.data_as(ctypes.c_void_p),
+        #        dm.ctypes.data_as(ctypes.c_void_p),
+        #        self.ao_mnmn.ctypes.data_as(ctypes.c_void_p),
+        #        aux_bound.ctypes.data_as(ctypes.c_void_p),
+        #        ao_slices.ctypes.data_as(ctypes.c_void_p),
+        #        ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
+        #        mol.natm, mol.nbas,
+        #        atm_conc.ctypes.data_as(ctypes.c_void_p),
+        #        mol.natm + auxmol.natm,
+        #        bas_conc.ctypes.data_as(ctypes.c_void_p),
+        #        mol.nbas + auxmol.nbas,
+        #        env_conc.ctypes.data_as(ctypes.c_void_p),
+        #        self.cintopt,
+        #        ctypes.c_double(j_tol),
+        #    ):
+        #        raise MemoryError("Failed to allocate J-build workspace")
+
+        #    rho = linalg.cho_solve(self.metric_factor, b)
+        #    del b
 
 
         for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
@@ -293,15 +293,16 @@ class PARI(lib.StreamObject):
                 nocc = m.shape[-1]
                 metric_block = np.ascontiguousarray(self.metric[:, q0:q1])
 
+                h = np.empty_like(d)
                 libpari._loop_k_wdbuild(
                                 metric_block.ctypes.data_as(ctypes.c_void_p),
                                 self.cab.ctypes.data_as(ctypes.c_void_p), self.cab_per_pair_size, self.cab_offset.ctypes.data_as(ctypes.c_void_p),
-                                m.ctypes.data_as(ctypes.c_void_p), w.ctypes.data_as(ctypes.c_void_p), d.ctypes.data_as(ctypes.c_void_p),
+                                m.ctypes.data_as(ctypes.c_void_p), w.ctypes.data_as(ctypes.c_void_p), d.ctypes.data_as(ctypes.c_void_p), h.ctypes.data_as(ctypes.c_void_p),
                                 mol.natm, nocc,
                                 ao_slices.ctypes.data_as(ctypes.c_void_p),aux_slices.ctypes.data_as(ctypes.c_void_p), auxmol.nao_nr(), mol.nao_nr(),
                                 q0, q1)
 
-                h = lib.einsum('qns,si->qni', w, m)
+                #h = lib.einsum('qns,si->qni', w, m)
                 h *= signs[None, None, :]
                 L += lib.einsum('qmi,qni->mn', d, h)
 
@@ -366,19 +367,15 @@ class PARI(lib.StreamObject):
         if not self._built:
             self.build()
 
-        ao_slices = self.mol.aoslice_by_atom()
-        aux_slices = self.auxmol.aoslice_by_atom()
-
         blksize = self._block_size(nvec=nvec)
 
         L = np.zeros((nao, nao)) if do_k else None
 
-        self.loop(
-            blksize, vj=vj, L=L,
-            signs=signs if do_k else None,
-            dm=dm if do_j else None,
-            m=m if do_k else None,
-            with_j=do_j, with_k=do_k)
+        self.loop(blksize, vj=vj, L=L,
+                  signs=signs if do_k else None,
+                  dm=dm if do_j else None,
+                  m=m if do_k else None,
+                  with_j=do_j, with_k=do_k)
 
         if do_k:
             vk = L + L.T
