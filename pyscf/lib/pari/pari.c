@@ -518,14 +518,15 @@ int _loop_j_bbuild(
     int mol_natm, int mol_nbas,
     int *atm, int natm, int *bas, int nbas, double *env,
     CINTOpt *opt, double tol)
+
+    // b = (\lambda \sigma|Q) D_{\lambda \sigma}, Q: all aux AOs
+
 {
     const int nao = ao_loc[mol_nbas];
     const int naux = ao_loc[nbas] - nao;
     const int naux_shells = nbas - mol_nbas;
 
-    memset(b, 0, (size_t)naux * sizeof(*b)); // b = (\lambda \sigma|Q) D_{\lambda \sigma}, Q: all aux AOs
-
-    double *bounds = malloc((size_t)mol_natm * mol_natm * sizeof(*double));
+    double *bounds = malloc((size_t)mol_natm * mol_natm * sizeof(double));
 
     /* Compute each atom-pair screening bound once. */
     for (int A = 0; A < mol_natm; A++) {
@@ -563,7 +564,7 @@ int _loop_j_bbuild(
     int nthreads = omp_get_max_threads();
     if (nthreads > naux_shells) nthreads = naux_shells;
 
-    double *work = malloc((size_t)nthreads * stride * sizeof(*work));
+    double *work = malloc((size_t)nthreads * stride * sizeof(double));
 
     #pragma omp parallel num_threads(nthreads)
     {
@@ -578,38 +579,30 @@ int _loop_j_bbuild(
 
             for (int A = 0; A < mol_natm; A++) {
                 for (int B = A; B < mol_natm; B++) {
-                    if (bounds[(size_t)A * mol_natm + B]
-                        * qbound < tol)
+                    if (bounds[(size_t)A * mol_natm + B] * qbound < tol)
                         continue;
 
                     double factor = A == B ? 1.0 : 2.0;
 
-                    for (int j = ao_slice[4*B];
-                         j < ao_slice[4*B+1]; j++) {
+                    for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++) {
                         int dj = ao_loc[j+1] - ao_loc[j];
 
-                        for (int i = ao_slice[4*A];
-                             i < ao_slice[4*A+1]; i++) {
+                        for (int i = ao_slice[4*A]; i < ao_slice[4*A+1]; i++) {
                             int di = ao_loc[i+1] - ao_loc[i];
                             int shls[3] = {i, j, k};
 
-                            if (!int3c2e_sph(
-                                    buf, NULL, shls,
-                                    atm, natm, bas, nbas,
-                                    env, opt, cache))
+                            if (!int3c2e_sph(buf, NULL, shls, atm, natm, bas, nbas, env, opt, cache)) {
                                 continue;
+							}
 
                             /* Integral layout: (di, dj, dk), Fortran order. */
                             for (int q = 0; q < dk; q++) {
                                 double value = 0.0;
-                                for (int jj = 0; jj < dj; jj++)
-                                    for (int ii = 0; ii < di; ii++)
-                                        value +=
-                                            dm[(size_t)(ao_loc[i]+ii) * nao
-                                               + ao_loc[j]+jj]
-                                            * buf[ii + (size_t)di
-                                                  * (jj + dj*q)];
-
+                                for (int jj = 0; jj < dj; jj++) {
+                                    for (int ii = 0; ii < di; ii++) {
+                                        value += dm[(size_t)(ao_loc[i]+ii) * nao + ao_loc[j]+jj] * buf[ii + (size_t)di * (jj + dj*q)];
+									}
+								}
                                 bk[q] += factor * value;
                             }
                         }

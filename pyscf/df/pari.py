@@ -190,87 +190,87 @@ class PARI(lib.StreamObject):
 
         do_j = with_j and dm is not None
 
-        if do_j:
-            # this part needs to be moved to C
-            j_tol = self.tol  # Set to zero to disable this screening.
-
-            pairs = []
-            for A in range(mol.natm):
-                i0, i1, a0, a1 = ao_slices[A]
-
-                for B in range(A, mol.natm):
-                    j0, j1, b0, b1 = ao_slices[B]
-                    if a0 == a1 or b0 == b1:
-                        continue
-
-                    dm_ab = dm[a0:a1, b0:b1]
-                    factor = 1 if A == B else 2
-                    qab = self.ao_mnmn[i0:i1, j0:j1].max()
-                    bound = factor * qab * np.abs(dm_ab).sum()
-
-                    pairs.append(
-                        (i0, i1, j0, j1, dm_ab, factor, bound)
-                    )
-
-
-            b = np.zeros(auxmol.nao_nr())
-
-            for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
-                aux_bound = self.aux_PP[sh0:sh1].max()
-
-                for i0, i1, j0, j1, dm_ab, factor, bound in pairs:
-                    if bound * aux_bound < j_tol:
-                        continue
-
-                    ints = df.incore.aux_e2(
-                        mol, auxmol,
-                        aosym="s1",
-                        cintopt=self.cintopt,
-                        shls_slice=(i0, i1, j0, j1, sh0, sh1),
-                    )
-                    b[q0:q1] += factor * lib.einsum(
-                        "ijq,ij->q", ints, dm_ab
-                    )
-                    del ints
-
-            rho = linalg.cho_solve(self.metric_factor, b)
-            del b
-
         #if do_j:
-        #    j_tol = self.tol
-        #    dm = np.ascontiguousarray(dm, dtype=np.float64)
+        #    # this part needs to be moved to C
+        #    j_tol = self.tol  # Set to zero to disable this screening.
+
+        #    pairs = []
+        #    for A in range(mol.natm):
+        #        i0, i1, a0, a1 = ao_slices[A]
+
+        #        for B in range(A, mol.natm):
+        #            j0, j1, b0, b1 = ao_slices[B]
+        #            if a0 == a1 or b0 == b1:
+        #                continue
+
+        #            dm_ab = dm[a0:a1, b0:b1]
+        #            factor = 1 if A == B else 2
+        #            qab = self.ao_mnmn[i0:i1, j0:j1].max()
+        #            bound = factor * qab * np.abs(dm_ab).sum()
+
+        #            pairs.append(
+        #                (i0, i1, j0, j1, dm_ab, factor, bound)
+        #            )
+
+
         #    b = np.zeros(auxmol.nao_nr())
 
-        #    atm_conc, bas_conc, env_conc = gto.mole.conc_env(
-        #        mol._atm, mol._bas, mol._env,
-        #        auxmol._atm, auxmol._bas, auxmol._env,
-        #    )
-        #    ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
-
-        #    aux_bound = np.empty(auxmol.nbas, dtype=np.float64)
         #    for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
-        #        aux_bound[sh0:sh1] = self.aux_PP[sh0:sh1].max()
+        #        aux_bound = self.aux_PP[sh0:sh1].max()
 
-        #    if libpari._loop_j_bbuild(
-        #        b.ctypes.data_as(ctypes.c_void_p),
-        #        dm.ctypes.data_as(ctypes.c_void_p),
-        #        self.ao_mnmn.ctypes.data_as(ctypes.c_void_p),
-        #        aux_bound.ctypes.data_as(ctypes.c_void_p),
-        #        ao_slices.ctypes.data_as(ctypes.c_void_p),
-        #        ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
-        #        mol.natm, mol.nbas,
-        #        atm_conc.ctypes.data_as(ctypes.c_void_p),
-        #        mol.natm + auxmol.natm,
-        #        bas_conc.ctypes.data_as(ctypes.c_void_p),
-        #        mol.nbas + auxmol.nbas,
-        #        env_conc.ctypes.data_as(ctypes.c_void_p),
-        #        self.cintopt,
-        #        ctypes.c_double(j_tol),
-        #    ):
-        #        raise MemoryError("Failed to allocate J-build workspace")
+        #        for i0, i1, j0, j1, dm_ab, factor, bound in pairs:
+        #            if bound * aux_bound < j_tol:
+        #                continue
+
+        #            ints = df.incore.aux_e2(
+        #                mol, auxmol,
+        #                aosym="s1",
+        #                cintopt=self.cintopt,
+        #                shls_slice=(i0, i1, j0, j1, sh0, sh1),
+        #            )
+        #            b[q0:q1] += factor * lib.einsum(
+        #                "ijq,ij->q", ints, dm_ab
+        #            )
+        #            del ints
 
         #    rho = linalg.cho_solve(self.metric_factor, b)
         #    del b
+
+        if do_j:
+            j_tol = self.tol
+            dm = np.ascontiguousarray(dm, dtype=np.float64)
+            b = np.zeros(auxmol.nao_nr())
+
+            atm_conc, bas_conc, env_conc = gto.mole.conc_env(
+                mol._atm, mol._bas, mol._env,
+                auxmol._atm, auxmol._bas, auxmol._env,
+            )
+            ao_loc_conc = gto.moleintor.make_loc(bas_conc, "int3c2e_sph")
+
+            aux_bound = np.empty(auxmol.nbas, dtype=np.float64)
+            for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
+                aux_bound[sh0:sh1] = self.aux_PP[sh0:sh1].max()
+
+            if libpari._loop_j_bbuild(
+                b.ctypes.data_as(ctypes.c_void_p),
+                dm.ctypes.data_as(ctypes.c_void_p),
+                self.ao_mnmn.ctypes.data_as(ctypes.c_void_p),
+                aux_bound.ctypes.data_as(ctypes.c_void_p),
+                ao_slices.ctypes.data_as(ctypes.c_void_p),
+                ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
+                mol.natm, mol.nbas,
+                atm_conc.ctypes.data_as(ctypes.c_void_p),
+                mol.natm + auxmol.natm,
+                bas_conc.ctypes.data_as(ctypes.c_void_p),
+                mol.nbas + auxmol.nbas,
+                env_conc.ctypes.data_as(ctypes.c_void_p),
+                self.cintopt,
+                ctypes.c_double(j_tol),
+            ):
+                raise MemoryError("Failed to allocate J-build workspace")
+
+            rho = linalg.cho_solve(self.metric_factor, b)
+            del b
 
 
         for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
@@ -388,10 +388,14 @@ if __name__ == '__main__':
 
     mol = gto.M(
         atom=
-        'O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587; \
+        ' \
+        O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587; \
+        O 10 0 0; H 10 -0.757 0.587; H 10 0.757 0.587; \
+        O 20 0 0; H 20 -0.757 0.587; H 20 0.757 0.587; \
+        O 30 0 0; H 30 -0.757 0.587; H 30 0.757 0.587; \
         ',
-        basis='ccpvqz', verbose=4)
-    mol.max_memory = 30000
+        basis='ccpvtz', verbose=4)
+    mol.max_memory = 3
     mf = scf.RKS(mol)
     mf.xc = 'b3lyp'
 
@@ -401,7 +405,7 @@ if __name__ == '__main__':
     #print("NO DF: %.5f" % (e-s))
 
     mf = scf.RKS(mol).density_fit()
-    mf.with_df = PARI(mol, auxbasis = "ccpvqz-jkfit")
+    mf.with_df = PARI(mol, auxbasis = "ccpvtz-jkfit")
     mf.xc = 'b3lyp'
     s = time.perf_counter()
     mf.kernel()
@@ -409,7 +413,7 @@ if __name__ == '__main__':
     print("PARI: %.5f" % (e-s))
 
     mf = scf.RKS(mol).density_fit()
-    mf.with_df = DF(mol, auxbasis = "ccpvqz-jkfit")
+    mf.with_df = DF(mol, auxbasis = "ccpvtz-jkfit")
     mf.xc = 'b3lyp'
     s = time.perf_counter()
     mf.kernel()
