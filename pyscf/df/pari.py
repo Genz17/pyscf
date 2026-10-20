@@ -129,7 +129,7 @@ class PARI(lib.StreamObject):
         ao_slices = np.ascontiguousarray(ao_slices, dtype=np.int32)
         aux_slices = np.ascontiguousarray(aux_slices, dtype=np.int32)
 
-        metric = auxmol.intor('int2c2e', hermi=1)
+        metric = np.ascontiguousarray(auxmol.intor('int2c2e', hermi=1))
         metric_factor = linalg.cho_factor(metric, lower=True, overwrite_a=False, check_finite=False)
         self.metric = np.ascontiguousarray(metric, dtype = np.float64)
         self.metric_factor = metric_factor
@@ -137,7 +137,7 @@ class PARI(lib.StreamObject):
 
         q_aux = np.sqrt(np.abs(metric.diagonal()))
         aux_loc = auxmol.ao_loc_nr()
-        self.aux_PP = np.array([q_aux[aux_loc[s]:aux_loc[s + 1]].max() for s in range(auxmol.nbas)])
+        self.aux_PP = np.ascontiguousarray([q_aux[aux_loc[s]:aux_loc[s + 1]].max() for s in range(auxmol.nbas)])
 
         npair = int((mol.natm + 1) * mol.natm / 2)
 
@@ -147,19 +147,31 @@ class PARI(lib.StreamObject):
         max_nao = int(nao_per_atom.max())
         max_naux = int(naux_per_atom.max())
         cab_per_pair_size = max_nao**2 * (2 * max_naux)
-        cab = np.zeros(npair * cab_per_pair_size, dtype=np.float64)
+
+        keep_pair = np.zeros(npair, dtype = np.int32)
+        libpari._atom_pair_screen(keep_pair.ctypes.data_as(ctypes.c_void_p), self.schwarz_mask.ctypes.data_as(ctypes.c_void_p),
+                                  ao_slices.ctypes.data_as(ctypes.c_void_p),
+                                  mol.natm, mol.nbas)
+        keep_pair_cumsum = np.ascontiguousarray(np.cumsum(keep_pair), dtype = np.int32)
+
+        self.keep_pair = keep_pair
+        self.keep_pair_cumsum = keep_pair_cumsum
+
+
+        cab = np.zeros(sum(keep_pair)* cab_per_pair_size, dtype=np.float64)
 
         cab_offset = np.zeros(npair, dtype = np.int32, order = 'C')
         self.cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, "int3c2e_sph")
 
         libpari._local_coeff(self.metric.ctypes.data_as(ctypes.c_void_p), cab.ctypes.data_as(ctypes.c_void_p), cab_offset.ctypes.data_as(ctypes.c_void_p), cab_per_pair_size,
                              atm_conc.ctypes.data_as(ctypes.c_void_p), bas_conc.ctypes.data_as(ctypes.c_void_p), env_conc.ctypes.data_as(ctypes.c_void_p), ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
-                             self.schwarz_mask.ctypes.data_as(ctypes.c_void_p),
+                             self.schwarz_mask.ctypes.data_as(ctypes.c_void_p), keep_pair.ctypes.data_as(ctypes.c_void_p), keep_pair_cumsum.ctypes.data_as(ctypes.c_void_p),
                              ao_slices.ctypes.data_as(ctypes.c_void_p), aux_slices.ctypes.data_as(ctypes.c_void_p),
                              mol.natm, mol.nbas,
                              mol.natm+auxmol.natm, mol.nbas+auxmol.nbas,
                              nao, naux,
-                             self.cintopt, ctypes.c_double(self.tol))
+                             self.cintopt, ctypes.c_double(self.tol),
+                             self.ao_mnmn.ctypes.data_as(ctypes.c_void_p), self.aux_PP.ctypes.data_as(ctypes.c_void_p))
 
         self.cab = cab
         self.cab_per_pair_size = cab_per_pair_size
@@ -283,26 +295,29 @@ class PARI(lib.StreamObject):
             #)
 
             ints = np.empty(((mol.nao_nr()+1) * mol.nao_nr()//2, q1 - q0), dtype = np.float64, order = 'F')
+            #ints = np.empty((sum(self.keep_pair), q1 - q0), dtype = np.float64, order = 'F')
             shls_slice = np.ascontiguousarray([0, mol.nbas, 0, mol.nbas, mol.nbas + sh0, mol.nbas + sh1], dtype = np.int32)
-            libpari.int3c2e_masked_parallelized(ints.ctypes.data_as(ctypes.c_void_p), shls_slice.ctypes.data_as(ctypes.c_void_p),
-                                                ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
-                                                self.cintopt,
-                                                atm_conc.ctypes.data_as(ctypes.c_void_p), mol.natm + auxmol.natm,
-                                                bas_conc.ctypes.data_as(ctypes.c_void_p),
-                                                mol.nbas + auxmol.nbas,
-                                                env_conc.ctypes.data_as(ctypes.c_void_p),
-                                                self.schwarz_mask.ctypes.data_as(ctypes.c_void_p),
-                                                mol.nbas
-                                                )
+            libpari._int3c2e_masked_parallelized(ints.ctypes.data_as(ctypes.c_void_p), shls_slice.ctypes.data_as(ctypes.c_void_p),
+                                                 ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
+                                                 self.cintopt,
+                                                 atm_conc.ctypes.data_as(ctypes.c_void_p), mol.natm + auxmol.natm,
+                                                 bas_conc.ctypes.data_as(ctypes.c_void_p),
+                                                 mol.nbas + auxmol.nbas,
+                                                 env_conc.ctypes.data_as(ctypes.c_void_p),
+                                                 self.schwarz_mask.ctypes.data_as(ctypes.c_void_p), mol.nbas,
+                                                 self.ao_mnmn.ctypes.data_as(ctypes.c_void_p), self.aux_PP.ctypes.data_as(ctypes.c_void_p),
+                                                 ctypes.c_double(self.tol)
+                                                 )
 
-            #jblock = None
             if do_j:
                 vj += lib.unpack_tril(ints @ rho[q0:q1])
                 #vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
-            w = None
             if with_k:
                 w = lib.unpack_tril(np.ascontiguousarray(ints.T))
+                #w = np.ascontiguousarray(ints.T)
+                del ints
+
                 #w = ints.transpose(2, 0, 1)
                 m = np.ascontiguousarray(m, dtype = np.float64)
                 d = np.ascontiguousarray(np.zeros((q1 - q0, mol.nao_nr(), m.shape[-1])), dtype=np.float64)
@@ -320,10 +335,9 @@ class PARI(lib.StreamObject):
 
                 #h = lib.einsum('qns,si->qni', w, m)
                 #h *= signs[None, None, :]
+                del metric_block, w
                 L += lib.einsum('qmi,qni,i->mn', d, h, signs)
-
-                del metric_block
-                del w 
+                del d, h
         return
 
 
@@ -415,8 +429,8 @@ if __name__ == '__main__':
         O 70 0 0; H 70 -0.757 0.587; H 70 0.757 0.587; \
         O 80 0 0; H 80 -0.757 0.587; H 80 0.757 0.587; \
         ',
-        basis='ccpvtz', verbose=4)
-    mol.max_memory = 300
+        basis='ccpvdz', verbose=4)
+    mol.max_memory = 500
     mf = scf.RKS(mol)
     mf.xc = 'b3lyp'
 
@@ -426,20 +440,20 @@ if __name__ == '__main__':
     #print("NO DF: %.5f" % (e-s))
 
     mf = scf.RKS(mol).density_fit()
-    mf.with_df = PARI(mol, auxbasis = "ccpvtz-jkfit")
+    mf.with_df = PARI(mol, auxbasis = "ccpvdz-jkfit")
     mf.xc = 'b3lyp'
     s = time.perf_counter()
     mf.kernel()
     e = time.perf_counter()
     print("PARI: %.5f" % (e-s))
 
-    mf = scf.RKS(mol).density_fit()
-    mf.with_df = DF(mol, auxbasis = "ccpvtz-jkfit")
-    mf.xc = 'b3lyp'
-    s = time.perf_counter()
-    mf.kernel()
-    e = time.perf_counter()
-    print("DF: %.5f" % (e-s))
+    #mf = scf.RKS(mol).density_fit()
+    #mf.with_df = DF(mol, auxbasis = "ccpvdz-jkfit")
+    #mf.xc = 'b3lyp'
+    #s = time.perf_counter()
+    #mf.kernel()
+    #e = time.perf_counter()
+    #print("DF: %.5f" % (e-s))
     #dm = mf.make_rdm1()  # Includes the RHF factor of two in the occupations.
 
     #pari = PARI(mol, auxbasis='ccpvqz-jkfit')

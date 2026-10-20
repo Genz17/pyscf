@@ -70,7 +70,8 @@ int fit_pair(double *ints, const double *metric, const int *aux_idx,
 
 static void int3c2e_masked(double *out, int *shls_slice, int *loc, CINTOpt *opt,
     					   int *atm, int natm, int *bas, int nbas, double *env,
-    					   const uint8_t *mask, int mol_nbas)
+    					   const uint8_t *mask, int mol_nbas,
+						   double *ao_mnmn, double *aux_PP, double tol)
 {
     int dims[3] = {loc[shls_slice[1]] - loc[shls_slice[0]],
                    loc[shls_slice[3]] - loc[shls_slice[2]],
@@ -90,6 +91,12 @@ static void int3c2e_masked(double *out, int *shls_slice, int *loc, CINTOpt *opt,
             size_t ij = (loc[i] - loc[shls_slice[0]]) + (size_t)dims[0] * (loc[j] - loc[shls_slice[2]]);
 
             for (int k = shls_slice[4]; k < shls_slice[5]; k++) {
+
+				if (ao_mnmn[i * mol_nbas + j] * aux_PP[k-mol_nbas] < tol) {
+					continue;
+				}
+
+
                 int shls[3] = {i, j, k};
                 size_t offset = ij + n_munu * (loc[k] - loc[shls_slice[4]]);
 
@@ -101,18 +108,17 @@ static void int3c2e_masked(double *out, int *shls_slice, int *loc, CINTOpt *opt,
     free(cache);
 }
 
-int int3c2e_masked_parallelized(
+int _int3c2e_masked_parallelized(
     double *out, int *shls_slice, int *loc, CINTOpt *opt,
     int *atm, int natm, int *bas, int nbas, double *env,
-    const uint8_t *mask, int mol_nbas)
+    const uint8_t *mask, int mol_nbas,
+	double *ao_mnmn, double *aux_PP,
+	double tol)
 {
-    if (shls_slice[0] != shls_slice[2] ||
-        shls_slice[1] != shls_slice[3]) return 2;
 
     int nao = loc[shls_slice[1]] - loc[shls_slice[0]];
     int nq = loc[shls_slice[5]] - loc[shls_slice[4]];
     size_t n_munu = (size_t)nao * (nao + 1) / 2;
-    if (nao == 0 || nq == 0) return 0;
 
     memset(out, 0, n_munu * nq * sizeof(*out));
 
@@ -132,6 +138,7 @@ int int3c2e_masked_parallelized(
         #pragma omp for collapse(2) schedule(dynamic, 1)
         for (int j = shls_slice[2]; j < shls_slice[3]; j++) {
             for (int i = shls_slice[0]; i < shls_slice[1]; i++) {
+
                 if (!buf || i < j || !mask[(size_t)i * mol_nbas + j])
                     continue;
 
@@ -141,6 +148,11 @@ int int3c2e_masked_parallelized(
                 int j0 = loc[j] - loc[shls_slice[2]];
 
                 for (int k = shls_slice[4]; k < shls_slice[5]; k++) {
+					
+					if (ao_mnmn[i * mol_nbas + j] * aux_PP[k-mol_nbas] < tol) {
+						continue;
+					}
+
                     int shls[3] = {i, j, k};
                     int dk = loc[k+1] - loc[k];
                     int q0 = loc[k] - loc[shls_slice[4]];
@@ -171,18 +183,46 @@ int int3c2e_masked_parallelized(
     return failed;
 }
 
+
+int _atom_pair_screen(int *keep_pair, const uint8_t *schwarz_mask,
+					  int *ao_slice,
+					  int mol_natm, int mol_nbas) {
+
+	#pragma omp parallel for collapse(2) schedule(dynamic, 1)
+	for (int A = 0; A < mol_natm; A++) {
+		for (int B = 0; B < mol_natm; B++) {
+			if (B < A) continue;
+			int count = A * (mol_natm + mol_natm - A + 1) / 2 + B - A;
+			
+			for (int i = ao_slice[4*A]; i < ao_slice[4*A+1] && !keep_pair[count]; i++) {
+				for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++) {
+					if (schwarz_mask[(size_t)i * mol_nbas + j]) {
+						keep_pair[count] = 1;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	return 0;
+
+}
+
+
 int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_size,
 				 int *atm_conc, int *bas_conc, double *env_conc, int *ao_loc_conc,
-				 const uint8_t *schwarz_mask,
+				 const uint8_t *schwarz_mask, int *keep_pair, int *keep_pair_cumsum,
 				 int *ao_slice, int *aux_slice,
 				 int mol_natm, int mol_nbas, 
 				 int conc_natm, int conc_nbas,
 				 int nao, int naux, 
-				 CINTOpt *opt, double tol) {
+				 CINTOpt *opt, double tol,
+				 double *ao_mnmn, double *aux_PP) {
 
 
 	//CINTOpt *opt = NULL;
-	int3c2e_optimizer(&opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc);
+	//int3c2e_optimizer(&opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc);
 
 	// npair: natm * (natm + 1) / 2
 	// cab is of size npair * (max_atm nao) * (max_atm nao)
@@ -195,22 +235,21 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 			if (B < A) continue;
 			int count = A * (mol_natm + mol_natm - A + 1) / 2 + B - A;
 			
-			int keep_pair = 0;
+			//int keep_pair = 0;
 
-			for (int i = ao_slice[4*A]; i < ao_slice[4*A+1] && !keep_pair; i++) {
-				for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++) {
-					if (schwarz_mask[(size_t)i * mol_nbas + j]) {
-						keep_pair = 1;
-						break;
-					}
-				}
-			}
+			//for (int i = ao_slice[4*A]; i < ao_slice[4*A+1] && !keep_pair; i++) {
+			//	for (int j = ao_slice[4*B]; j < ao_slice[4*B+1]; j++) {
+			//		if (schwarz_mask[(size_t)i * mol_nbas + j]) {
+			//			keep_pair = 1;
+			//			break;
+			//		}
+			//	}
+			//}
 
-			if (!keep_pair) {
+			if (!keep_pair[count]) {
 				cab_offset[count] = 0;
 				continue;
 			}
-
 
 
 			int ao_A = ao_slice[4*A+3] - ao_slice[4*A+2];
@@ -231,14 +270,15 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				double *out = malloc((size_t)ao_A * ao_B * ao_aux * sizeof(double)); // (\mu\nu| Q) eris, sorted by ao inx
 
 
-				int3c2e_masked(out, shls_slice, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas);
+				int3c2e_masked(out, shls_slice, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas,
+							   ao_mnmn, aux_PP, tol);
 
 				int info = fit_pair(out, aux_QP, aux_idx, ao_A, ao_B, ao_aux, naux);
 				
 				cab_offset[count] = ao_A * ao_B * ao_aux;
 
 				for (int jj=0; jj < ao_A * ao_B * ao_aux; jj++) {
-					cab[(size_t)cab_per_pair_size*count + jj] = out[jj]; // cab: F order, (na, nb, np)
+					cab[(size_t)cab_per_pair_size*(keep_pair_cumsum[count]-1) + jj] = out[jj]; // cab: F order, (na, nb, np)
 				}
 
 				free(out);
@@ -272,8 +312,10 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				double *out_B = malloc((size_t)ao_A * ao_B * ao_aux_B * sizeof(double)); // (\mu\nu| Q) eris, sorted by ao inx
 				double *out = malloc((size_t)ao_A * ao_B * ao_aux * sizeof(double));
 
-				int3c2e_masked(out_A, shls_slice_A, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas);
-				int3c2e_masked(out_B, shls_slice_B, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas);
+				int3c2e_masked(out_A, shls_slice_A, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas,
+						ao_mnmn, aux_PP, tol);
+				int3c2e_masked(out_B, shls_slice_B, ao_loc_conc, opt, atm_conc, conc_natm, bas_conc, conc_nbas, env_conc, schwarz_mask, mol_nbas,
+						ao_mnmn, aux_PP, tol);
 
 				size_t nA = (size_t)ao_A * ao_B * ao_aux_A;
 				size_t nB = (size_t)ao_A * ao_B * ao_aux_B;
@@ -284,7 +326,7 @@ int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_
 				cab_offset[count] = ao_A * ao_B * ao_aux;
 
 				for (int jj=0; jj < ao_A * ao_B * ao_aux; jj++) {
-					cab[(size_t)cab_per_pair_size*count + jj] = out[jj]; // cab: F order, (na, nb, np)
+					cab[(size_t)cab_per_pair_size* (keep_pair_cumsum[count]-1) + jj] = out[jj]; // cab: F order, (na, nb, np)
 				}
 
 				free(out); 
@@ -446,7 +488,7 @@ int _loop_k_wdbuild(double *metric_block,
 
             pair.nab = pair.na * pair.nb;
 
-            pair.coeff = cab + count * (size_t)cab_per_pair_size;
+            pair.coeff = cab + used * (size_t)cab_per_pair_size;
             pairs[used++] = pair;
 
             if (pair.nab > max_nab) max_nab = pair.nab;
