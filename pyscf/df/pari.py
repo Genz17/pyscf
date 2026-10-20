@@ -282,7 +282,7 @@ class PARI(lib.StreamObject):
             #    shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
             #)
 
-            ints = np.empty((mol.nao_nr(), mol.nao_nr(), q1 - q0), dtype = np.float64, order = 'F')
+            ints = np.empty(((mol.nao_nr()+1) * mol.nao_nr()//2, q1 - q0), dtype = np.float64, order = 'F')
             shls_slice = np.ascontiguousarray([0, mol.nbas, 0, mol.nbas, mol.nbas + sh0, mol.nbas + sh1], dtype = np.int32)
             libpari.int3c2e_masked_parallelized(ints.ctypes.data_as(ctypes.c_void_p), shls_slice.ctypes.data_as(ctypes.c_void_p),
                                                 ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
@@ -297,13 +297,13 @@ class PARI(lib.StreamObject):
 
             #jblock = None
             if do_j:
-                #vj += lib.unpack_tril(ints @ rho[q0:q1])
-                vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
+                vj += lib.unpack_tril(ints @ rho[q0:q1])
+                #vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
             w = None
             if with_k:
-                #w = lib.unpack_tril(np.ascontiguousarray(ints.T))
-                w = np.ascontiguousarray(ints.transpose(2, 0, 1))
+                w = lib.unpack_tril(np.ascontiguousarray(ints.T))
+                #w = ints.transpose(2, 0, 1)
                 m = np.ascontiguousarray(m, dtype = np.float64)
                 d = np.ascontiguousarray(np.zeros((q1 - q0, mol.nao_nr(), m.shape[-1])), dtype=np.float64)
                 nocc = m.shape[-1]
@@ -409,6 +409,11 @@ if __name__ == '__main__':
         O 10 0 0; H 10 -0.757 0.587; H 10 0.757 0.587; \
         O 20 0 0; H 20 -0.757 0.587; H 20 0.757 0.587; \
         O 30 0 0; H 30 -0.757 0.587; H 30 0.757 0.587; \
+        O 40 0 0; H 40 -0.757 0.587; H 40 0.757 0.587; \
+        O 50 0 0; H 50 -0.757 0.587; H 50 0.757 0.587; \
+        O 60 0 0; H 60 -0.757 0.587; H 60 0.757 0.587; \
+        O 70 0 0; H 70 -0.757 0.587; H 70 0.757 0.587; \
+        O 80 0 0; H 80 -0.757 0.587; H 80 0.757 0.587; \
         ',
         basis='ccpvtz', verbose=4)
     mol.max_memory = 300

@@ -101,46 +101,75 @@ static void int3c2e_masked(double *out, int *shls_slice, int *loc, CINTOpt *opt,
     free(cache);
 }
 
-void int3c2e_masked_parallelized(double *out, int *shls_slice, int *loc, CINTOpt *opt,
-							 int *atm, int natm, int *bas, int nbas, double *env,
-							 const uint8_t *mask, int mol_nbas) {
-    int dims[3] = {loc[shls_slice[1]] - loc[shls_slice[0]],
-                   loc[shls_slice[3]] - loc[shls_slice[2]],
-                   loc[shls_slice[5]] - loc[shls_slice[4]]};
-    size_t n_munu = (size_t)dims[0] * dims[1];
+int int3c2e_masked_parallelized(
+    double *out, int *shls_slice, int *loc, CINTOpt *opt,
+    int *atm, int natm, int *bas, int nbas, double *env,
+    const uint8_t *mask, int mol_nbas)
+{
+    if (shls_slice[0] != shls_slice[2] ||
+        shls_slice[1] != shls_slice[3]) return 2;
 
-    memset(out, 0, n_munu * dims[2] * sizeof(*out));
+    int nao = loc[shls_slice[1]] - loc[shls_slice[0]];
+    int nq = loc[shls_slice[5]] - loc[shls_slice[4]];
+    size_t n_munu = (size_t)nao * (nao + 1) / 2;
+    if (nao == 0 || nq == 0) return 0;
 
-    size_t ncache = GTOmax_cache_size(int3c2e_sph, shls_slice, 3, atm, natm, bas, nbas, env);
-    double *cache = malloc(ncache * sizeof(*cache));
+    memset(out, 0, n_munu * nq * sizeof(*out));
 
-	#pragma omp parallel 
-	{
-		double *cache = malloc(ncache * sizeof(*cache));
-		#pragma omp for collapse(2) schedule(dynamic, 1)
-		for (int j = shls_slice[2]; j < shls_slice[3]; j++) {
-			for (int i = shls_slice[0]; i < shls_slice[1]; i++) {
-				if (!mask[(size_t)i * mol_nbas + j]) continue;
+    size_t ncache = GTOmax_cache_size(
+        int3c2e_sph, shls_slice, 3, atm, natm, bas, nbas, env);
+    int max_ao = GTOmax_shell_dim(loc, shls_slice, 2);
+    int max_aux = GTOmax_shell_dim(loc, shls_slice + 4, 1);
+    size_t nbuf = (size_t)max_ao * max_ao * max_aux;
+    int failed = 0;
 
-				size_t ij =
-					(loc[i] - loc[shls_slice[0]]) +
-					(size_t)dims[0] * (loc[j] - loc[shls_slice[2]]);
+    #pragma omp parallel reduction(|:failed)
+    {
+        double *buf = malloc((nbuf + ncache) * sizeof(*buf));
+        double *cache = buf ? buf + nbuf : NULL;
+        if (!buf) failed = 1;
 
-				for (int k = shls_slice[4]; k < shls_slice[5]; k++) {
-					int shls[3] = {i, j, k};
-					size_t offset =
-						ij + n_munu * (loc[k] - loc[shls_slice[4]]);
+        #pragma omp for collapse(2) schedule(dynamic, 1)
+        for (int j = shls_slice[2]; j < shls_slice[3]; j++) {
+            for (int i = shls_slice[0]; i < shls_slice[1]; i++) {
+                if (!buf || i < j || !mask[(size_t)i * mol_nbas + j])
+                    continue;
 
-					int3c2e_sph(out + offset, dims, shls,
-							   atm, natm, bas, nbas, env, opt, cache);
-				}
-			}
-		}
+                int di = loc[i+1] - loc[i];
+                int dj = loc[j+1] - loc[j];
+                int i0 = loc[i] - loc[shls_slice[0]];
+                int j0 = loc[j] - loc[shls_slice[2]];
 
-		free(cache);
-	}
+                for (int k = shls_slice[4]; k < shls_slice[5]; k++) {
+                    int shls[3] = {i, j, k};
+                    int dk = loc[k+1] - loc[k];
+                    int q0 = loc[k] - loc[shls_slice[4]];
+
+                    if (!int3c2e_sph(buf, NULL, shls, atm, natm,
+                                    bas, nbas, env, opt, cache))
+                        continue;
+
+                    for (int q = 0; q < dk; q++) {
+                        for (int a = 0; a < di; a++) {
+                            size_t mu = i0 + a;
+                            size_t p = mu * (mu+1) / 2 + j0;
+                            int count = i == j ? a+1 : dj;
+
+                            for (int b = 0; b < count; b++) {
+                                out[p+b + n_munu * (q0+q)] =
+                                    buf[a + (size_t)di * (b + dj*q)];
+                            }
+                        }
+                    }
+					
+
+                }
+            }
+        }
+        free(buf);
+    }
+    return failed;
 }
-
 
 int _local_coeff(double *aux_QP, double *cab, int *cab_offset, int cab_per_pair_size,
 				 int *atm_conc, int *bas_conc, double *env_conc, int *ao_loc_conc,
