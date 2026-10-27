@@ -120,26 +120,23 @@ int _int3c2e_masked_parallelized(
     int nq = loc[shls_slice[5]] - loc[shls_slice[4]];
     size_t n_munu = (size_t)nao * (nao + 1) / 2;
 
-    memset(out, 0, n_munu * nq * sizeof(*out));
+    //memset(out, 0, n_munu * nq * sizeof(*out));
 
-    size_t ncache = GTOmax_cache_size(
-        int3c2e_sph, shls_slice, 3, atm, natm, bas, nbas, env);
+    size_t ncache = GTOmax_cache_size(int3c2e_sph, shls_slice, 3, atm, natm, bas, nbas, env);
     int max_ao = GTOmax_shell_dim(loc, shls_slice, 2);
     int max_aux = GTOmax_shell_dim(loc, shls_slice + 4, 1);
     size_t nbuf = (size_t)max_ao * max_ao * max_aux;
-    int failed = 0;
 
-    #pragma omp parallel reduction(|:failed)
+    #pragma omp parallel 
     {
         double *buf = malloc((nbuf + ncache) * sizeof(*buf));
-        double *cache = buf ? buf + nbuf : NULL;
-        if (!buf) failed = 1;
+        double *cache = buf + nbuf;
 
         #pragma omp for collapse(2) schedule(dynamic, 1)
         for (int j = shls_slice[2]; j < shls_slice[3]; j++) {
             for (int i = shls_slice[0]; i < shls_slice[1]; i++) {
 
-                if (!buf || i < j || !mask[(size_t)i * mol_nbas + j])
+                if (i < j || !mask[(size_t)i * mol_nbas + j])
                     continue;
 
                 int di = loc[i+1] - loc[i];
@@ -154,12 +151,13 @@ int _int3c2e_masked_parallelized(
 					}
 
                     int shls[3] = {i, j, k};
+
+                    if (!int3c2e_sph(buf, NULL, shls, atm, natm, bas, nbas, env, opt, cache)) {
+                        continue;
+                    }
+
                     int dk = loc[k+1] - loc[k];
                     int q0 = loc[k] - loc[shls_slice[4]];
-
-                    if (!int3c2e_sph(buf, NULL, shls, atm, natm,
-                                    bas, nbas, env, opt, cache))
-                        continue;
 
                     for (int q = 0; q < dk; q++) {
                         for (int a = 0; a < di; a++) {
@@ -168,8 +166,7 @@ int _int3c2e_masked_parallelized(
                             int count = i == j ? a+1 : dj;
 
                             for (int b = 0; b < count; b++) {
-                                out[p+b + n_munu * (q0+q)] =
-                                    buf[a + (size_t)di * (b + dj*q)];
+                                out[p+b + n_munu * (q0+q)] = buf[a + (size_t)di * (b + dj*q)];
                             }
                         }
                     }
@@ -180,7 +177,7 @@ int _int3c2e_masked_parallelized(
         }
         free(buf);
     }
-    return failed;
+    return 0;
 }
 
 

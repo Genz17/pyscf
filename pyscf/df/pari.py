@@ -58,7 +58,7 @@ class PARI(lib.StreamObject):
         self.stdout = mol.stdout
         self.verbose = mol.verbose
         self.max_memory = mol.max_memory
-        self.block_nao = 16
+        self.block_nao = 1
         self._built = False
 
     def dump_flags(self, verbose=None):
@@ -79,18 +79,21 @@ class PARI(lib.StreamObject):
         return self
 
     def _block_size(self, nvec=0):
+        return self.block_nao
 
-        nao = self.mol.nao_nr()
+        #nao = self.mol.nao_nr()
 
-        available = max(
-            0.0, self.max_memory - lib.current_memory()[0]
-        ) * 1e6
+        #available = max(
+        #    0.0, self.max_memory - lib.current_memory()[0]
+        #) * 1e6
 
-        bytes_per_q = 8 * (3 * nao**2 + 4 * nao * nvec) # this should be checked
+        #bytes_per_q = 8 * (3 * nao**2 + 4 * nao * nvec) # this should be checked
 
-        return max(1,
-                min(int(self.block_nao),
-                int(0.8 * available / bytes_per_q)))
+        #res = max(1, min(int(self.block_nao), int(0.8 * available / bytes_per_q)))
+        #print('remaining memory block size', int(0.8 * available / bytes_per_q))
+        #print('current block size:', res)
+
+        #return res
 
 
     def build(self):
@@ -201,6 +204,7 @@ class PARI(lib.StreamObject):
             raise ValueError('blksize must be positive')
 
         mol, auxmol = self.mol, self.auxmol
+        m = np.ascontiguousarray(m, dtype = np.float64)
 
         do_j = with_j and dm is not None
 
@@ -266,7 +270,7 @@ class PARI(lib.StreamObject):
             for sh0, sh1, q0, q1 in _aux_shell_blocks(auxmol, blksize):
                 aux_bound[sh0:sh1] = self.aux_PP[sh0:sh1].max()
 
-            if libpari._loop_j_bbuild(
+            libpari._loop_j_bbuild(
                 b.ctypes.data_as(ctypes.c_void_p),
                 dm.ctypes.data_as(ctypes.c_void_p),
                 self.ao_mnmn.ctypes.data_as(ctypes.c_void_p),
@@ -280,9 +284,7 @@ class PARI(lib.StreamObject):
                 mol.nbas + auxmol.nbas,
                 env_conc.ctypes.data_as(ctypes.c_void_p),
                 self.cintopt,
-                ctypes.c_double(j_tol),
-            ):
-                raise MemoryError("Failed to allocate J-build workspace")
+                ctypes.c_double(j_tol))
 
             rho = linalg.cho_solve(self.metric_factor, b)
             del b
@@ -294,10 +296,11 @@ class PARI(lib.StreamObject):
             #    shls_slice=(0, mol.nbas, 0, mol.nbas, sh0, sh1),
             #)
 
-            ints = np.empty(((mol.nao_nr()+1) * mol.nao_nr()//2, q1 - q0), dtype = np.float64, order = 'F')
+            w = np.zeros(((mol.nao_nr()+1) * mol.nao_nr()//2, q1 - q0), dtype = np.float64, order = 'F')
+            #w = np.zeros((mol.nao_nr()**2, q1 - q0), dtype = np.float64, order = 'F')
             #ints = np.empty((sum(self.keep_pair), q1 - q0), dtype = np.float64, order = 'F')
             shls_slice = np.ascontiguousarray([0, mol.nbas, 0, mol.nbas, mol.nbas + sh0, mol.nbas + sh1], dtype = np.int32)
-            libpari._int3c2e_masked_parallelized(ints.ctypes.data_as(ctypes.c_void_p), shls_slice.ctypes.data_as(ctypes.c_void_p),
+            libpari._int3c2e_masked_parallelized(w.ctypes.data_as(ctypes.c_void_p), shls_slice.ctypes.data_as(ctypes.c_void_p),
                                                  ao_loc_conc.ctypes.data_as(ctypes.c_void_p),
                                                  self.cintopt,
                                                  atm_conc.ctypes.data_as(ctypes.c_void_p), mol.natm + auxmol.natm,
@@ -306,20 +309,19 @@ class PARI(lib.StreamObject):
                                                  env_conc.ctypes.data_as(ctypes.c_void_p),
                                                  self.schwarz_mask.ctypes.data_as(ctypes.c_void_p), mol.nbas,
                                                  self.ao_mnmn.ctypes.data_as(ctypes.c_void_p), self.aux_PP.ctypes.data_as(ctypes.c_void_p),
-                                                 ctypes.c_double(self.tol)
-                                                 )
+                                                 ctypes.c_double(self.tol))
 
             if do_j:
-                vj += lib.unpack_tril(ints @ rho[q0:q1])
+                vj += lib.unpack_tril(w @ rho[q0:q1])
                 #vj += lib.einsum('Q, mnQ -> mn', rho[q0:q1], ints)
 
             if with_k:
-                w = lib.unpack_tril(np.ascontiguousarray(ints.T))
+                w = lib.unpack_tril(np.ascontiguousarray(w.T))
+                #w = w + w.T
                 #w = np.ascontiguousarray(ints.T)
-                del ints
+                #del ints
 
                 #w = ints.transpose(2, 0, 1)
-                m = np.ascontiguousarray(m, dtype = np.float64)
                 d = np.ascontiguousarray(np.zeros((q1 - q0, mol.nao_nr(), m.shape[-1])), dtype=np.float64)
                 nocc = m.shape[-1]
                 metric_block = np.ascontiguousarray(self.metric[:, q0:q1])
@@ -417,19 +419,33 @@ class PARI(lib.StreamObject):
 if __name__ == '__main__':
 
     mol = gto.M(
-        atom=
-        ' \
-        O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587; \
-        O 10 0 0; H 10 -0.757 0.587; H 10 0.757 0.587; \
-        O 20 0 0; H 20 -0.757 0.587; H 20 0.757 0.587; \
-        O 30 0 0; H 30 -0.757 0.587; H 30 0.757 0.587; \
-        O 40 0 0; H 40 -0.757 0.587; H 40 0.757 0.587; \
-        O 50 0 0; H 50 -0.757 0.587; H 50 0.757 0.587; \
-        O 60 0 0; H 60 -0.757 0.587; H 60 0.757 0.587; \
-        O 70 0 0; H 70 -0.757 0.587; H 70 0.757 0.587; \
-        O 80 0 0; H 80 -0.757 0.587; H 80 0.757 0.587; \
-        ',
-        basis='ccpvtz', verbose=4)
+            atom = '''
+            H      1.2194     -0.1652      2.1600
+            C      0.6825     -0.0924      1.2087
+            C     -0.7075     -0.0352      1.1973
+            H     -1.2644     -0.0630      2.1393
+            C     -1.3898      0.0572     -0.0114
+            H     -2.4836      0.1021     -0.0204
+            C     -0.6824      0.0925     -1.2088
+            H     -1.2194      0.1652     -2.1599
+            C      0.7075      0.0352     -1.1973
+            H      1.2641      0.0628     -2.1395
+            C      1.3899     -0.0572      0.0114
+            H      2.4836     -0.1022      0.0205
+            ''',
+            #atom=
+            #' \
+            #O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587; \
+            #O 10 0 0; H 10 -0.757 0.587; H 10 0.757 0.587; \
+            #O 20 0 0; H 20 -0.757 0.587; H 20 0.757 0.587; \
+            #O 30 0 0; H 30 -0.757 0.587; H 30 0.757 0.587; \
+            #O 40 0 0; H 40 -0.757 0.587; H 40 0.757 0.587; \
+            #O 50 0 0; H 50 -0.757 0.587; H 50 0.757 0.587; \
+            #O 60 0 0; H 60 -0.757 0.587; H 60 0.757 0.587; \
+            #O 70 0 0; H 70 -0.757 0.587; H 70 0.757 0.587; \
+            #O 80 0 0; H 80 -0.757 0.587; H 80 0.757 0.587; \
+            #',
+        basis='ccpvdz', verbose=4)
     #mol.max_memory = 100
     mf = scf.RHF(mol)
 
@@ -439,7 +455,7 @@ if __name__ == '__main__':
     #print("NO DF: %.5f" % (e-s))
 
     mf = scf.RHF(mol).density_fit()
-    mf.with_df = PARI(mol, auxbasis = "ccpvtz-jkfit")
+    mf.with_df = PARI(mol, auxbasis = "ccpvdz-jkfit")
     mf.with_df.max_memory = 100
     s = time.perf_counter()
     mf.kernel()
@@ -448,7 +464,7 @@ if __name__ == '__main__':
 
     mf = scf.RHF(mol).density_fit()
     mf.with_df = DF(mol, auxbasis = "ccpvdz-jkfit")
-    mf.with_df.max_memory = 100
+    mf.with_df.max_memory = 1000
     s = time.perf_counter()
     mf.kernel()
     e = time.perf_counter()
