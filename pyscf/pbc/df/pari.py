@@ -1,30 +1,4 @@
-#!/usr/bin/env python
-
-r'''Literal real-space PARI equations for periodic short-range exchange.
-
-For P[k] = M[k].conj() @ M[k].T, this module explicitly constructs
-
-    D[mu,Q_U,i,k] = sum_(lambda,T1) C[mu_0,lambda_T1,Q_U]
-                                    M[lambda,i,k] exp(-i k.T1)
-    H[nu_T,Q_U,i,k] = sum_(sigma,T2) M[sigma,i,k] exp(-i k.T2)
-        [(Q_U|sigma_T2 nu_T) - 1/2 sum_R C[sigma_T2,nu_T,R] (Q_U|R)]
-    L[0,T] = sum_(k,Q_U,i) D[mu,Q_U,i,k].conj() H[nu_T,Q_U,i,k] / Nk
-    K[0,T] = L[0,T] + L[0,-T].conj().T
-    K[kout] = sum_T exp(i kout.T) K[0,T].
-
-Every integral uses erfc(omega*r)/r, including its finite G=0 contribution.
-Auxiliary images remain distinct.  Translation covariance reuses H blocks:
-H[nu_T,Q_U,k] = exp(-i k.U) H[nu_(T-U),Q_0,k].
-
-Use get_k_from_m(M), get_k_from_mo(mo_coeff, mo_occ), or get_k(dm).
-The density route requires Hermitian PSD matrices.  K excludes the exchange
-minus sign and RHF factor of 1/2.  Independent pair_rcut, integral_rcut, and
-metric_rcut control finite lattice sums; None estimates each radius.
-See pari.md for the derivation, input conventions, and reference-code limits.
-'''
-
 from dataclasses import dataclass
-
 import numpy as np
 from scipy import linalg
 
@@ -98,7 +72,7 @@ def _images(cell, radius):
     indices |= {tuple(-np.asarray(x)) for x in indices}
     indices.add((0, 0, 0))
     lattice = cell.lattice_vectors()
-    indices = sorted(indices, key=lambda x: (np.linalg.norm(np.dot(x, lattice)), x))
+    indices = sorted(indices, key=lambda x:x)
     return indices, np.asarray(indices).dot(lattice)
 
 
@@ -232,7 +206,7 @@ class PARI(lib.StreamObject):
             rcut = max(pbcgto.cell.estimate_rcut(cell, precision),
                        rsdf_builder.estimate_ft_rcut(cell, precision).max())
         self.rcut = rcut
-        indices, self.translations = _images(cell, rcut)
+        indices, self.translations = _images(cell, rcut) # T1
         atoms = [_atom_mol(cell, a, np.zeros(3)) for a in range(cell.natm)]
         auxatoms = [_atom_mol(auxcell, a, np.zeros(3)) for a in range(cell.natm)]
         coords = cell.atom_coords()
@@ -245,7 +219,7 @@ class PARI(lib.StreamObject):
                 for b, molb0 in enumerate(atoms):
                     if molb0.nbas == 0:
                         continue
-                    if (a, b, *index) > (b, a, *opposite):
+                    if (a, *index) > (b, *opposite):
                         continue
                     if np.linalg.norm(coords[b] + translation - coords[a]) > rcut:
                         continue
@@ -339,30 +313,54 @@ class PARI(lib.StreamObject):
                         'mlq,li->mqi', coeff, mk[b0:b1])
         return d
 
-    def _metric_blocks(self):
-        '''Actual-image integrals V[V][Q,R] = (Q_0|R_V)_SR.'''
-        if self._metric_cache is not None:
-            return self._metric_cache
-        auxmol = self.auxcell.to_mol()
-        blocks = {}
-        for index, translation in zip(self._metric_indices, self._metric_translations):
+    def _metric_block(self, index):
+        """Return V[index][Q,R] = (Q_0|R_index)_SR."""
+        index = tuple(index)
+
+        if self._metric_cache is None:
+            self._metric_cache = {}
+
+        blocks = self._metric_cache
+
+        if index not in blocks:
             reverse = tuple(-n for n in index)
-            if reverse in blocks:
-                blocks[index] = blocks[reverse].T
-                continue
-            if index == (0, 0, 0):
+
+            # Store the negative image, or zero, as a C-contiguous matrix.
+            key = min(index, reverse)
+            auxmol = self.auxcell.to_mol()
+
+            if key == (0, 0, 0):
                 with auxmol.with_range_coulomb(-self.omega):
-                    blocks[index] = auxmol.intor('int2c2e', hermi=1)
+                    matrix = auxmol.intor('int2c2e', hermi=1)
             else:
+                translation = np.asarray(key).dot(self.cell.lattice_vectors())
+
                 shifted = pbctools._build_supcell_(
                     auxmol.copy(), self.auxcell, translation[None, :])
                 pairmol = gto.conc_mol(auxmol, shifted)
+
                 nbas = auxmol.nbas
                 with pairmol.with_range_coulomb(-self.omega):
-                    blocks[index] = pairmol.intor('int2c2e', shls_slice=(
-                        0, nbas, nbas, 2 * nbas))
-        self._metric_cache = blocks
-        return blocks
+                    matrix = pairmol.intor(
+                        'int2c2e',
+                        shls_slice=(0, nbas, nbas, 2 * nbas))
+
+            matrix = np.ascontiguousarray(matrix, dtype=np.float64)
+            blocks[key] = matrix
+
+            if key != (0, 0, 0):
+                opposite = tuple(-n for n in key)
+                blocks[opposite] = matrix.T  # Shares the same memory.
+
+        return blocks[index]
+
+
+    def _metric_blocks(self):
+        """Return only the metric images used by the H construction."""
+        return {
+            index: self._metric_block(index)
+            for index in self._metric_indices
+        }
 
     def _build_h0(self, m, kpts, d):
         '''H0[T] = H_i^{nu_T Q_0,k}, retaining the bare and fitted terms.'''
