@@ -9,6 +9,18 @@ from pyscf.pbc import gto as pbcgto
 from pyscf.pbc.df import incore, rsdf_builder
 from pyscf.pbc.tools import pbc as pbctools
 
+import ctypes
+
+libpari = lib.load_library('libpari')
+I, P, D = ctypes.c_int, ctypes.c_void_p, ctypes.c_double
+
+class CPair(ctypes.Structure):
+    _fields_ = [(s, ctypes.c_int) for s in ('A', 'B', 'nao_A', 'nao_B', 'naux_A', 'naux_B')]
+    _fields_ += [(s, ctypes.POINTER(ctypes.c_double)) for s in ('T1', 'ca', 'cb')]
+
+
+def ptr(a):
+    return a.ctypes.data_as(P)
 
 def _as_kpts(kpts):
     return np.zeros((1, 3)) if kpts is None else np.asarray(kpts, dtype=float).reshape(-1, 3)
@@ -155,7 +167,8 @@ class PARI(lib.StreamObject):
         self.auxcell = None
         self.rcut = None
         self.translations = None
-        self._pairs = []
+        self._pairs = None
+        self._pair_buffers = None
         self._signature = None
         self._build_token = object()
         self._metric_cache = None
@@ -183,96 +196,122 @@ class PARI(lib.StreamObject):
         log.info('Literal erfc kernel, including its finite G=0 contribution')
         return self
 
+
+    def _metric_block(self, index):
+        """Return V[index][Q,R] = (Q_0|R_index)_SR."""
+
+        index = tuple(index)
+        if self._metric_cache is None:
+            self._metric_cache = {}
+
+        blocks = self._metric_cache
+
+        if index not in blocks:
+            reverse = tuple(-n for n in index)
+
+            # Store the negative image, or zero, as a C-contiguous matrix.
+            key = min(index, reverse)
+            auxmol = self.auxcell.to_mol()
+
+            if key == (0, 0, 0):
+                with auxmol.with_range_coulomb(-self.omega):
+                    matrix = auxmol.intor('int2c2e', hermi=1)
+            else:
+                translation = np.asarray(key).dot(self.cell.lattice_vectors())
+
+                shifted = pbctools._build_supcell_(auxmol.copy(), self.auxcell, translation[None, :])
+                pairmol = gto.conc_mol(auxmol, shifted)
+
+                nbas = auxmol.nbas
+                with pairmol.with_range_coulomb(-self.omega):
+                    matrix = pairmol.intor('int2c2e', shls_slice=(0, nbas, nbas, 2 * nbas))
+
+            matrix = np.ascontiguousarray(matrix, dtype=np.float64)
+            blocks[key] = matrix
+
+            if key != (0, 0, 0):
+                opposite = tuple(-n for n in key)
+                blocks[opposite] = matrix.T  # Shares the same memory.
+
+        return blocks[index]
+
+
+    def _metric_blocks(self):
+        """Return only the metric images used by the H construction."""
+        return {
+            index: self._metric_block(index)
+            for index in self._metric_indices
+        }
+
+
     def build(self):
         self.reset()
         cell = self.cell
-        if self.omega is None or not np.isfinite(self.omega) or self.omega <= 0:
-            raise ValueError('omega must be finite and positive for erfc(omega*r)/r')
-        if not 0 < self.linear_dep_threshold < 1:
-            raise ValueError('linear_dep_threshold must lie between zero and one')
-        self.dump_flags()
-        t0 = (logger.process_clock(), logger.perf_counter())
-        auxcell = incore.make_auxcell(cell, self.auxbasis)
-        self.auxcell = auxcell
+        aux = self.auxcell = incore.make_auxcell(cell, self.auxbasis)
+
         self._ao_slices = cell.aoslice_by_atom()
-        self._aux_slices = auxcell.aoslice_by_atom()
+        self._aux_slices = aux.aoslice_by_atom()
+        precision = self.precision * 1e-2
 
-        if self.pair_rcut is not None:
-            rcut = float(self.pair_rcut)
-        elif cell.dimension == 0:
-            rcut = np.inf  # No atom-pair truncation for the molecular limit.
-        else:
-            precision = self.precision * 1e-2
-            rcut = max(pbcgto.cell.estimate_rcut(cell, precision),
-                       rsdf_builder.estimate_ft_rcut(cell, precision).max())
-        self.rcut = rcut
-        indices, self.translations = _images(cell, rcut) # T1
-        atoms = [_atom_mol(cell, a, np.zeros(3)) for a in range(cell.natm)]
-        auxatoms = [_atom_mol(auxcell, a, np.zeros(3)) for a in range(cell.natm)]
-        coords = cell.atom_coords()
+        self.rcut = self.pair_rcut
+        if self.rcut is None:
+            self.rcut = np.inf if cell.dimension == 0 else max(
+                pbcgto.cell.estimate_rcut(cell, precision),
+                rsdf_builder.estimate_ft_rcut(cell, precision).max())
 
-        for index, translation in zip(indices, self.translations):
-            opposite = tuple(-n for n in index)
-            for a, mola in enumerate(atoms):
-                if mola.nbas == 0:
-                    continue
-                for b, molb0 in enumerate(atoms):
-                    if molb0.nbas == 0:
-                        continue
-                    if (a, *index) > (b, *opposite):
-                        continue
-                    if np.linalg.norm(coords[b] + translation - coords[a]) > rcut:
-                        continue
-                    same = a == b and index == (0, 0, 0)
-                    if same:
-                        mol, auxmol = mola, auxatoms[a]
-                        shls = (0, mol.nbas, 0, mol.nbas, 0, auxmol.nbas)
-                    else:
-                        molb = _atom_mol(cell, b, translation)
-                        auxb = _atom_mol(auxcell, b, translation)
-                        mol = gto.conc_mol(mola, molb)
-                        auxmol = gto.conc_mol(auxatoms[a], auxb)
-                        shls = (0, mola.nbas, mola.nbas, mol.nbas, 0, auxmol.nbas)
-                    with auxmol.with_range_coulomb(-self.omega):
-                        metric = auxmol.intor('int2c2e', hermi=1)
-                    with mol.with_range_coulomb(-self.omega):
-                        rhs = mol_incore.aux_e2(mol, auxmol, aosym='s1', shls_slice=shls)
-                    c = _fit(metric, rhs, self.linear_dep_threshold)
-                    na = auxatoms[a].nao_nr()
-                    ca = c[:, :, :na].copy()
-                    cb = None if same else c[:, :, na:].copy()
-                    self._pairs.append(_Pair(a, b, translation.copy(), ca, cb,
-                                             index))
-                    if not same:
-                        # C^{b0,a(-T)} follows by translation and AO exchange.
-                        self._pairs.append(_Pair(b, a, -translation.copy(),
-                                                 cb.transpose(1, 0, 2),
-                                                 ca.transpose(1, 0, 2), opposite))
+        indices, self.translations = _images(cell, self.rcut)
+        T1 = self.translations
+
+        coords = np.ascontiguousarray(cell.atom_coords())
+        nao = np.asarray(self._ao_slices[:, 3] - self._ao_slices[:, 2], dtype=np.int32)
+        naux = np.asarray(self._aux_slices[:, 3] - self._aux_slices[:, 2], dtype=np.int32)
+
+        offsets = np.ascontiguousarray(self._aux_slices[:, 2], dtype=np.int32) # aux functions starting index
+
+        sizes = (ctypes.c_size_t * 3)() # number of (pairs, ca, cb)
+
+        libpari._count_local_pairs(len(T1), ptr(T1), ptr(coords), ptr(nao), ptr(naux),cell.natm, self.rcut, sizes)
+
+        self._pairs = (CPair * sizes[0])()
+        ca_buffer, cb_buffer = np.empty(sizes[1]), np.empty(sizes[2])
+
+        # C reads only the negative images and the zero image.
+        metrics = [np.ascontiguousarray(self._metric_block(i)) for i in indices[:len(T1) // 2 + 1]]
+        metric_ptrs = (P * len(metrics))(*(m.ctypes.data for m in metrics))
+
+        status = libpari._local_coeff(
+            len(T), ptr(T), self._pairs, ptr(ca_buffer), ptr(cb_buffer), sizes,
+            ptr(coords), ptr(nao), ptr(naux), ptr(offsets), aux.nao_nr(),
+            metric_ptrs,
+            ptr(cell._atm), ptr(cell._bas), ptr(cell._env),
+            ptr(aux._atm), ptr(aux._bas), ptr(aux._env),
+            cell.natm, cell.nbas, cell._env.size, aux.nbas, aux._env.size,
+            int(cell.cart), ctypes.c_double(self.omega), ctypes.c_double(self.rcut))
+        if status:
+            raise RuntimeError(f'_local_coeff failed with status {status}')
+        self._pair_buffers = (ca_buffer, cb_buffer, T)
+
+        self.integral_radius = self.integral_rcut
+        self.metric_radius = self.metric_rcut
         if cell.dimension == 0:
             self.integral_radius = self.metric_radius = 0.
         else:
-            precision = self.precision * 1e-2
-            self.integral_radius = self.integral_rcut
             if self.integral_radius is None:
                 self.integral_radius = max(
-                    rsdf_builder.estimate_rcut(cell, auxcell, self.omega, precision).max(),
+                    rsdf_builder.estimate_rcut(
+                        cell, aux, self.omega, precision).max(),
                     pbcgto.cell.estimate_rcut(cell, precision))
-            self.metric_radius = self.metric_rcut
             if self.metric_radius is None:
                 self.metric_radius = rsdf_builder.estimate_rs_2c2e_rcut(
-                    auxcell, self.omega, precision)
-        self._bare_indices, self._bare_translations = _images(cell, self.integral_radius)
-        self._metric_indices, self._metric_translations = _images(cell, self.metric_radius)
-        # A molecular cluster is used only for bare integrals.  Its lattice
-        # radius is independent of the support of the fitted coefficients.
+                    aux, self.omega, precision)
+
+        self._bare_indices, self._bare_translations = _images(
+            cell, self.integral_radius)
+        self._metric_indices, self._metric_translations = _images(
+            cell, self.metric_radius)
         self._bare_mol = pbctools._build_supcell_(
             cell.to_mol().copy(), cell, self._bare_translations)
         self._signature = self._settings()
-        logger.info(self, 'PARI: %d directed atom/image pairs, rcut = %.8g Bohr',
-                    len(self._pairs), self.rcut)
-        logger.info(self, 'Bare-integral images = %d; metric images = %d',
-                    len(self._bare_indices), len(self._metric_indices))
-        logger.timer(self, 'PARI local fits', *t0)
         return self
 
     def _format_m(self, m, kpts):
@@ -312,55 +351,6 @@ class PARI(lib.StreamObject):
                     d[u][k][a0:a1, q0:q1] += phase * np.einsum(
                         'mlq,li->mqi', coeff, mk[b0:b1])
         return d
-
-    def _metric_block(self, index):
-        """Return V[index][Q,R] = (Q_0|R_index)_SR."""
-        index = tuple(index)
-
-        if self._metric_cache is None:
-            self._metric_cache = {}
-
-        blocks = self._metric_cache
-
-        if index not in blocks:
-            reverse = tuple(-n for n in index)
-
-            # Store the negative image, or zero, as a C-contiguous matrix.
-            key = min(index, reverse)
-            auxmol = self.auxcell.to_mol()
-
-            if key == (0, 0, 0):
-                with auxmol.with_range_coulomb(-self.omega):
-                    matrix = auxmol.intor('int2c2e', hermi=1)
-            else:
-                translation = np.asarray(key).dot(self.cell.lattice_vectors())
-
-                shifted = pbctools._build_supcell_(
-                    auxmol.copy(), self.auxcell, translation[None, :])
-                pairmol = gto.conc_mol(auxmol, shifted)
-
-                nbas = auxmol.nbas
-                with pairmol.with_range_coulomb(-self.omega):
-                    matrix = pairmol.intor(
-                        'int2c2e',
-                        shls_slice=(0, nbas, nbas, 2 * nbas))
-
-            matrix = np.ascontiguousarray(matrix, dtype=np.float64)
-            blocks[key] = matrix
-
-            if key != (0, 0, 0):
-                opposite = tuple(-n for n in key)
-                blocks[opposite] = matrix.T  # Shares the same memory.
-
-        return blocks[index]
-
-
-    def _metric_blocks(self):
-        """Return only the metric images used by the H construction."""
-        return {
-            index: self._metric_block(index)
-            for index in self._metric_indices
-        }
 
     def _build_h0(self, m, kpts, d):
         '''H0[T] = H_i^{nu_T Q_0,k}, retaining the bare and fitted terms.'''
@@ -474,6 +464,7 @@ class PARI(lib.StreamObject):
         Default output shape is (nk,nao,nao), including for a single k-point.
         An explicit kpts_band of shape (3,) returns a single (nao,nao) matrix.
         '''
+
         kpts = _as_kpts(self.kpts if kpts is None else kpts)
         bands = kpts if kpts_band is None else _as_kpts(kpts_band)
         l_real = self.get_l(m, kpts)
@@ -521,6 +512,7 @@ class PARI(lib.StreamObject):
         (...,nao,nao) is also accepted.  Without kpts_band the input shape is
         restored.  There is no density-matrix contraction fallback.
         '''
+
         if hermi != 1:
             raise ValueError('The supplied D/H/L equations require hermi=1')
         if exxdiv is not None:
@@ -550,10 +542,12 @@ class PARI(lib.StreamObject):
     def get_jk(self, dm, hermi=1, kpts=None, kpts_band=None,
                with_j=False, with_k=True, omega=None, exxdiv=None):
         '''Exchange-only interface; optional omega must equal -PARI.omega.'''
+
         if with_j:
             raise NotImplementedError('Periodic PARI implements short-range exchange only')
         if omega is not None and (self.omega is None or omega >= 0 or
                                   not np.isclose(omega, -self.omega, rtol=0, atol=1e-14)):
             raise ValueError('get_jk omega must equal -PARI.omega')
         vk = self.get_k(dm, hermi, kpts, kpts_band, exxdiv) if with_k else None
+
         return None, vk

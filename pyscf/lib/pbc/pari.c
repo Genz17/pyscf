@@ -10,25 +10,12 @@
 #include "gto/gto.h"
 #include "vhf/fblas.h"
 
-double vector_norm_squared(double *vec, int length) {
-	double res = 0.;
-	for (int i = 0; i < length; i++) {
-		res += vec[i] * vec[i];
-	}
-
-	return res;
-}
-
 typedef struct {
     int A, B, nao_A, nao_B, naux_A, naux_B;
 	double *T1, *ca, *cb;
 	// ca of size nao_A * nao_B * naux_A
 	// cb of size nao_A * nao_B * naux_B
 } PARILoopPair;
-
-/* Shared selection rule: 1 means keep, 0 means skip, -1 means invalid input.
- * sizea/sizeb count doubles, not bytes. No integrals are evaluated here.
- */
 
 static int _pari_pair_sizes(int A, int B, int zero_image,
     						const double *translation,
@@ -145,9 +132,9 @@ int _local_coeff(int T1_num, double *T1,
     			 int aux_nbas, int aux_env_size, int cart,
     			 double omega, double pair_rcut) {
 
-    extern CINTIntegralFunction int2c2e_sph, int2c2e_cart;
     extern CINTIntegralFunction int3c2e_sph, int3c2e_cart;
-    extern CINTOptimizerFunction int2c2e_optimizer, int3c2e_optimizer;
+    extern CINTOptimizerFunction int3c2e_optimizer;
+
     extern void dsyev_(const char *, const char *, const int *, double *,
                        const int *, double *, double *, const int *, int *);
 	extern void dpotrf_(const char *, const int *, double *,
@@ -156,28 +143,35 @@ int _local_coeff(int T1_num, double *T1,
     int *atm = NULL, *bas = NULL, *loc = NULL;
     double *env = NULL, *storage = NULL;
     CINTOpt *opt3 = NULL;
-    int status = 0;
 
-    /* Make four environment copies once; only atom/basis records and
-     * coordinate slots change between pairs. Never shift the caller's env.
-     */
     size_t max_nbas = 2 * ((size_t)mol_nbas + aux_nbas);
-    size_t nenv = 2 * ((size_t)mol_env_size + aux_env_size) + 12;
+    size_t nenv = 2 * ((size_t)mol_env_size + aux_env_size) + 12; // the additional 12 slots are used to store the atom locations
 
     atm = malloc(4 * ATM_SLOTS * sizeof(*atm));
     bas = malloc(max_nbas * BAS_SLOTS * sizeof(*bas));
     loc = malloc((max_nbas + 1) * sizeof(*loc));
     env = malloc(nenv * sizeof(*env));
 
+	// env = [
+    // cell._env,       // orbital basis: A_0
+    // cell._env,       // orbital basis: B_T
+    // auxcell._env,    // auxiliary basis: A_0
+    // auxcell._env,    // auxiliary basis: B_T
+    // 12 coordinates
+	// ]
+	
+	
+	
     memcpy(env, _env, (size_t)mol_env_size * sizeof(*env));
     memcpy(env + mol_env_size, _env, (size_t)mol_env_size * sizeof(*env));
     memcpy(env + 2 * mol_env_size, _aux_env, (size_t)aux_env_size * sizeof(*env));
-    memcpy(env + 2 * mol_env_size + aux_env_size, _aux_env,
-           (size_t)aux_env_size * sizeof(*env));
+    memcpy(env + 2 * mol_env_size + aux_env_size, _aux_env, (size_t)aux_env_size * sizeof(*env));
+
     env[PTR_RANGE_OMEGA] = -omega;
 
     size_t ipair = 0, offa = 0, offb = 0;
     int middle = T1_num / 2;
+
     for (int it = 0; it <= middle; it++) {
         double *translation = T1 + (size_t)it * 3;
         int zero_image = (it == middle);
@@ -187,22 +181,21 @@ int _local_coeff(int T1_num, double *T1,
                 size_t sizea, sizeb;
                 int selected = _pari_pair_sizes(
                     A, B, zero_image, translation, coords,
-                    nao, naux, pair_rcut, &same, &sizea, &sizeb);
+                    nao, naux, pair_rcut, &same, &sizea, &sizeb); // this is recomputed, or one needs to keep another array to indicate some pairs are skipped
 
                 if (!selected) continue;
-                if (ipair >= sizes[0] || sizea > sizes[1] - offa ||
-                    sizeb > sizes[2] - offb) { status = -3; goto cleanup; }
 
                 int na = nao[A], nb = nao[B];
                 int nq = naux[A] + (same ? 0 : naux[B]);
                 size_t npair_size = (size_t)na * nb;
+
                 /* A_0, B_T, aux(A_0), aux(B_T), with independent coordinate
                  * pointers. In the same-center case each basis occurs once.
                  * Original basis coefficients and environments are preserved.
                  */
+
                 int starts[4], ends[4];
-                int env_offsets[4] = {0, mol_env_size, 2 * mol_env_size,
-                                     2 * mol_env_size + aux_env_size};
+                int env_offsets[4] = {0, mol_env_size, 2 * mol_env_size, 2 * mol_env_size + aux_env_size};
                 int coord_start = 2 * mol_env_size + 2 * aux_env_size;
 
                 int nbas = 0;
@@ -212,27 +205,31 @@ int _local_coeff(int T1_num, double *T1,
                     const int *source_atm = auxiliary ? _aux_atm : _atm;
                     const int *source_bas = auxiliary ? _aux_bas : _bas;
                     int source_nbas = auxiliary ? aux_nbas : mol_nbas;
+
                     int *record = atm + group * ATM_SLOTS;
-                    memcpy(record, source_atm + (size_t)atom * ATM_SLOTS,
-                           ATM_SLOTS * sizeof(*record));
+                    memcpy(record, source_atm + (size_t)atom * ATM_SLOTS, ATM_SLOTS * sizeof(*record));
+
                     record[PTR_COORD] = coord_start + group * 3;
                     record[PTR_ZETA] += env_offsets[group];
+
                     if (record[PTR_FRAC_CHARGE] != 0) {
                         record[PTR_FRAC_CHARGE] += env_offsets[group];
                     }
                     for (int xyz = 0; xyz < 3; xyz++) {
-                        env[record[PTR_COORD] + xyz] = coords[(size_t)atom * 3 + xyz]
-                            + (group % 2 ? translation[xyz] : 0.);
+                        env[record[PTR_COORD] + xyz] = coords[(size_t)atom * 3 + xyz] + (group % 2 ? translation[xyz] : 0.);
                     }
+
                     if (same && group % 2) {
                         starts[group] = starts[group - 1];
                         ends[group] = ends[group - 1];
                         continue;
                     }
+
                     starts[group] = nbas;
                     for (int ish = 0; ish < source_nbas; ish++) {
                         const int *shell = source_bas + (size_t)ish * BAS_SLOTS;
                         if (shell[ATOM_OF] != atom) continue;
+
                         int *target = bas + (size_t)nbas * BAS_SLOTS;
                         memcpy(target, shell, BAS_SLOTS * sizeof(*target));
                         target[ATOM_OF] = group;
@@ -245,23 +242,18 @@ int _local_coeff(int T1_num, double *T1,
 
                 loc[0] = 0;
                 for (int ish = 0; ish < nbas; ish++) {
-                    loc[ish + 1] = loc[ish] + (cart ? CINTcgto_cart(ish, bas)
-                                                   : CINTcgto_spheric(ish, bas));
+                    loc[ish + 1] = loc[ish] + (cart ? CINTcgto_cart(ish, bas) : CINTcgto_spheric(ish, bas));
                 }
 
                 CINTIntegralFunction *intor3 = cart ? int3c2e_cart : int3c2e_sph;
-                int slices3[6] = {starts[0], ends[0], starts[1], ends[1],
-                                  starts[2], ends[3]};
+                int slices3[6] = {starts[0], ends[0], starts[1], ends[1], starts[2], ends[3]};
 
-                size_t cache3 = GTOmax_cache_size((int (*)())intor3, slices3, 3,
-                                                 atm, 4, bas, nbas, env);
-                size_t ncache = cache3;
+                size_t ncache = GTOmax_cache_size((int (*)())intor3, slices3, 3, atm, 4, bas, nbas, env);
 
                 int npair = (int)npair_size;
                 int lwork = 3 * nq;  /* DSYEV requires at least 3*nq-1. */
                 size_t ncoeff = npair_size * nq;
-                size_t nstorage = (size_t)nq * nq + 2 * ncoeff + 2 * nq
-                                  + (size_t)lwork + ncache;
+                size_t nstorage = (size_t)nq * nq + 2 * ncoeff + 2 * nq + (size_t)lwork + ncache;
 
                 storage = calloc(nstorage, sizeof(*storage));
 
@@ -283,8 +275,7 @@ int _local_coeff(int T1_num, double *T1,
                             int shls[3] = {ish, jsh, qsh};
                             size_t offset = loc[ish] - loc[starts[0]] + (size_t)na * (loc[jsh] - loc[starts[1]]) + npair_size * (loc[qsh] - loc[starts[2]]);
 
-                            intor3(rhs + offset, dims3, shls,
-                                   atm, 4, bas, nbas, env, opt3, cache);
+                            intor3(rhs + offset, dims3, shls, atm, 4, bas, nbas, env, opt3, cache);
                         }
                     }
                 }
@@ -292,12 +283,6 @@ int _local_coeff(int T1_num, double *T1,
 
 				for (int q = 0; q < nq; q++) {
 					double diagonal = metric[q + (size_t)nq * q];
-
-					if (!(diagonal > 0.) || !isfinite(diagonal)) {
-						status = -4;
-						goto cleanup;
-					}
-
 					scale[q] = sqrt(diagonal);
 				}
 
@@ -317,11 +302,6 @@ int _local_coeff(int T1_num, double *T1,
 				/* Factor the normalized metric: V_normalized = L L^T. */
 				dpotrf_("L", &nq, metric, &nq, &info);
 
-				if (info != 0) {
-					status = info > 0 ? -4 : -5;
-					goto cleanup;
-				}
-
 				/* Solve X L^T = B_normalized. */
 				dtrsm_("R", "L", "T", "N",
 					   &npair, &nq, &one,
@@ -340,22 +320,23 @@ int _local_coeff(int T1_num, double *T1,
                 pair->naux_A = naux[A];
                 pair->naux_B = naux[B];
                 pair->T1 = translation;
-                pair->ca = sizea ? ca + offa : NULL;
-                pair->cb = sizeb ? cb + offb : NULL;
+                pair->ca = ca + offa;
+                pair->cb = cb + offb;
+
                 for (int i = 0; i < na; i++) {
                     for (int j = 0; j < nb; j++) {
                         size_t p = i + (size_t)na * j;
                         size_t output = (size_t)i * nb + j;
+
                         for (int q = 0; q < naux[A]; q++) {
-                            pair->ca[output * naux[A] + q] =
-                                rhs[p + npair_size * q] / scale[q];
+                            pair->ca[output * naux[A] + q] = rhs[p + npair_size * q] / scale[q];
                         }
+
                         if (!same) {
                             for (int q = 0; q < naux[B]; q++) {
-                                pair->cb[output * naux[B] + q] =
-                                    rhs[p + npair_size * (naux[A] + q)]
-                                    / scale[naux[A] + q];
+                                pair->cb[output * naux[B] + q] = rhs[p + npair_size * (naux[A] + q)] / scale[naux[A] + q];
                             }
+
                         }
                     }
                 }
@@ -368,14 +349,12 @@ int _local_coeff(int T1_num, double *T1,
             }
         }
     }
-    if (ipair != sizes[0] || offa != sizes[1] || offb != sizes[2]) status = -3;
 
-cleanup:
-    if (opt3 != NULL) CINTdel_optimizer(&opt3);
     free(storage);
     free(env);
     free(loc);
     free(bas);
     free(atm);
-    return status;
+
+    return 0;
 }
