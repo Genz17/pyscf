@@ -14,10 +14,18 @@ import ctypes
 libpari = lib.load_library('libpari')
 I, P, D = ctypes.c_int, ctypes.c_void_p, ctypes.c_double
 
+@dataclass
+class _Pair:
+    a: int
+    b: int
+    translation: np.ndarray
+    ca: np.ndarray
+    cb: object  # None for a pair on one atom in one cell (a set union).
+    image: tuple
+
 class CPair(ctypes.Structure):
     _fields_ = [(s, ctypes.c_int) for s in ('A', 'B', 'nao_A', 'nao_B', 'naux_A', 'naux_B')]
     _fields_ += [(s, ctypes.POINTER(ctypes.c_double)) for s in ('T1', 'ca', 'cb')]
-
 
 def ptr(a):
     return a.ctypes.data_as(P)
@@ -50,31 +58,6 @@ def _atom_mol(cell, atom, shift):
     return mol
 
 
-def _fit(metric, rhs, threshold):
-    '''Solve a local fit in a diagonally normalized, rank-revealing metric.'''
-    scale = np.sqrt(metric.diagonal())
-    normalized = metric / scale[:, None] / scale[None, :]
-    w, u = linalg.eigh(normalized)
-    if w[0] < -max(threshold, 1e-12) * w[-1]:
-        raise ValueError('The short-range auxiliary metric is not positive semidefinite')
-    keep = w > threshold * w[-1]
-    # rhs is (nao_A, nao_B, naux); do not assume contiguous AO shell sizes.
-    shape = rhs.shape
-    b = rhs.reshape(-1, shape[-1]).T / scale[:, None]
-    u = u[:, keep]
-    projected = np.einsum('qi,qj->ij', u, b) / w[keep, None]
-    c = np.einsum('qi,ij->qj', u, projected) / scale[:, None]
-    return c.T.reshape(shape)
-
-
-@dataclass
-class _Pair:
-    a: int
-    b: int
-    translation: np.ndarray
-    ca: np.ndarray
-    cb: object  # None for a pair on one atom in one cell (a set union).
-    image: tuple
 
 
 def _images(cell, radius):
@@ -117,31 +100,9 @@ class PARIIntermediates:
 
 
 class PARI(lib.StreamObject):
-    r'''Robust short-range periodic PARI exchange.
-
-    Args:
-        cell: Built periodic Cell.
-        kpts: Full, equally weighted list of k-points, in inverse Bohr.
-        auxbasis: Auxiliary basis accepted by ``incore.make_auxcell``.
-        omega: Positive erfc range parameter.  If omitted, infer it only from
-            a negative ``cell.omega`` (PySCF's short-range convention).
-
-    Attributes:
-        precision: Integral lattice-sum precision; defaults to cell.precision.
-        pair_rcut: AO-pair separation cutoff in Bohr; None estimates a cutoff.
-        integral_rcut: Independent lattice radius for bare three-center
-            integrals; None estimates a short-range three-center cutoff.
-        metric_rcut: Independent radius for auxiliary metric lattice sums.
-        linear_dep_threshold: Relative eigenvalue cutoff of the diagonally
-            normalized local metric; defaults to 1e-12.
-
-    Call ``reset(cell)`` after changing the cell geometry or orbital basis.
-    Changing omega, auxbasis, precision, any radius, or linear_dep_threshold
-    automatically invalidates the fitted coefficients at the next call.
-    '''
 
     _keys = {'cell', 'kpts', 'auxbasis', 'omega', 'precision', 'pair_rcut',
-             'linear_dep_threshold', 'auxcell', 'max_memory', 'verbose',
+             'auxcell', 'max_memory', 'verbose',
              'stdout', 'rcut', 'translations', 'integral_rcut', 'metric_rcut',
              'integral_radius', 'metric_radius'}
 
@@ -156,7 +117,6 @@ class PARI(lib.StreamObject):
         self.pair_rcut = None
         self.integral_rcut = None
         self.metric_rcut = None
-        self.linear_dep_threshold = 1e-12
         self.stdout, self.verbose = cell.stdout, cell.verbose
         self.max_memory = cell.max_memory
         self.reset()
@@ -178,8 +138,7 @@ class PARI(lib.StreamObject):
 
     def _settings(self):
         return (id(self.cell), repr(self.auxbasis), self.omega, self.precision,
-                self.pair_rcut, self.integral_rcut, self.metric_rcut,
-                self.linear_dep_threshold)
+                self.pair_rcut, self.integral_rcut, self.metric_rcut)
 
     def _ensure_built(self):
         if self._signature != self._settings():
@@ -189,8 +148,6 @@ class PARI(lib.StreamObject):
         log = logger.new_logger(self, verbose)
         log.info('******** %s ********', self.__class__)
         log.info('short-range omega = %s; auxbasis = %s', self.omega, self.auxbasis)
-        log.info('precision = %g; pair_rcut = %s; linear_dep_threshold = %g',
-                 self.precision, self.pair_rcut, self.linear_dep_threshold)
         log.info('integral_rcut = %s; metric_rcut = %s',
                  self.integral_rcut, self.metric_rcut)
         log.info('Literal erfc kernel, including its finite G=0 contribution')
@@ -270,7 +227,7 @@ class PARI(lib.StreamObject):
 
         sizes = (ctypes.c_size_t * 3)() # number of (pairs, ca, cb)
 
-        libpari._count_local_pairs(len(T1), ptr(T1), ptr(coords), ptr(nao), ptr(naux),cell.natm, self.rcut, sizes)
+        libpari._count_local_pairs(len(T1), ptr(T1), ptr(coords), ptr(nao), ptr(naux),cell.natm, ctypes.c_double(self.rcut), sizes)
 
         self._pairs = (CPair * sizes[0])()
         ca_buffer, cb_buffer = np.empty(sizes[1]), np.empty(sizes[2])
@@ -280,7 +237,7 @@ class PARI(lib.StreamObject):
         metric_ptrs = (P * len(metrics))(*(m.ctypes.data for m in metrics))
 
         status = libpari._local_coeff(
-            len(T), ptr(T), self._pairs, ptr(ca_buffer), ptr(cb_buffer), sizes,
+            len(T1), ptr(T1), self._pairs, ptr(ca_buffer), ptr(cb_buffer), sizes,
             ptr(coords), ptr(nao), ptr(naux), ptr(offsets), aux.nao_nr(),
             metric_ptrs,
             ptr(cell._atm), ptr(cell._bas), ptr(cell._env),
@@ -289,7 +246,7 @@ class PARI(lib.StreamObject):
             int(cell.cart), ctypes.c_double(self.omega), ctypes.c_double(self.rcut))
         if status:
             raise RuntimeError(f'_local_coeff failed with status {status}')
-        self._pair_buffers = (ca_buffer, cb_buffer, T)
+        self._pair_buffers = (ca_buffer, cb_buffer, T1)
 
         self.integral_radius = self.integral_rcut
         self.metric_radius = self.metric_rcut
@@ -305,8 +262,8 @@ class PARI(lib.StreamObject):
                 self.metric_radius = rsdf_builder.estimate_rs_2c2e_rcut(
                     aux, self.omega, precision)
 
-        self._bare_indices, self._bare_translations = _images(
-            cell, self.integral_radius)
+        self._bare_indices, self._bare_translations = _images(cell, self.integral_radius)
+
         self._metric_indices, self._metric_translations = _images(
             cell, self.metric_radius)
         self._bare_mol = pbctools._build_supcell_(
@@ -325,37 +282,79 @@ class PARI(lib.StreamObject):
         return tuple(np.zeros((self.cell.nao_nr(), self.auxcell.nao_nr(),
                                block.shape[1]), dtype=complex) for block in m)
 
-    def _build_d(self, m, kpts):
-        '''For each pair (A_0,B_T1), accumulate U=0 first, then U=T1.
 
-        Both contributions carry the partner-AO phase exp(-i k.T1).
-        '''
+    def _build_d(self, m, kpts):
+        # Build d[U][k][mu,Q,i] from the CPair records.
+        # U is the lattice where the aux functions Q sits
+
         zero = (0, 0, 0)
         d = {zero: self._empty_intermediate(m)}
+        inv_lattice = np.linalg.inv(self.cell.lattice_vectors())
+
         for pair in self._pairs:
-            a0, a1 = self._ao_slices[pair.a, 2:]
-            b0, b1 = self._ao_slices[pair.b, 2:]
-            qa0, qa1 = self._aux_slices[pair.a, 2:]
-            qb0, qb1 = self._aux_slices[pair.b, 2:]
-            phases = np.exp(-1j * kpts.dot(pair.translation))
-            contributions = (
-                (zero, qa0, qa1, pair.ca),       # U=0: auxiliary functions on A_0
-                (pair.image, qb0, qb1, pair.cb), # U=T1: auxiliary functions on B_T1
-            )
-            for u, q0, q1, coeff in contributions:
-                if coeff is None:  # A=B and T1=0: the auxiliary union occurs once.
+            A, B = pair.A, pair.B
+            na, nb = pair.nao_A, pair.nao_B
+            nqa, nqb = pair.naux_A, pair.naux_B
+
+            a0, a1 = self._ao_slices[A, 2:]
+            b0, b1 = self._ao_slices[B, 2:]
+            qa0, qa1 = self._aux_slices[A, 2:]
+            qb0, qb1 = self._aux_slices[B, 2:]
+
+            # Cartesian translation and its integer lattice index.
+            T1 = np.ctypeslib.as_array(pair.T1, shape=(3,))
+            image = tuple(np.rint(T1 @ inv_lattice).astype(int))
+            reverse = tuple(-x for x in image)
+            same = (A == B and image == zero)
+
+            # C stores coefficients as [AO on A, AO on B, auxiliary].
+            ca = np.ctypeslib.as_array(
+                pair.ca, shape=(na * nb * nqa,)
+            ).reshape(na, nb, nqa)
+
+            # For a same-center pair, C allocates no cb coefficients.
+            cb = None
+            if not same:
+                cb = np.ctypeslib.as_array(
+                    pair.cb, shape=(na * nb * nqb,)
+                ).reshape(na, nb, nqb)
+
+                for u in (image, reverse):
+                    if u not in d:
+                        d[u] = self._empty_intermediate(m)
+
+            phases = np.exp(-1j * kpts.dot(T1))
+
+            for ik, (mk, phase) in enumerate(zip(m, phases)):
+                ma = mk[a0:a1]
+                mb = mk[b0:b1]
+
+                # Forward pair (A_0, B_T1), auxiliaries on A_0.
+                d[zero][ik][a0:a1, qa0:qa1] += phase * lib.einsum('abq,bi->aqi', ca, mb)
+
+                if same:
                     continue
-                if u not in d:
-                    d[u] = self._empty_intermediate(m)
-                for k, (mk, phase) in enumerate(zip(m, phases)):
-                    d[u][k][a0:a1, q0:q1] += phase * np.einsum(
-                        'mlq,li->mqi', coeff, mk[b0:b1])
+
+                # Forward pair (A_0, B_T1), auxiliaries on B_T1.
+                d[image][ik][a0:a1, qb0:qb1] += phase * lib.einsum('abq,bi->aqi', cb, mb)
+
+                reverse_phase = phase.conjugate()
+
+                # Reverse pair (B_0, A_-T1), auxiliaries on B_0.
+                d[zero][ik][b0:b1, qb0:qb1] += reverse_phase * np.einsum('abq,ai->bqi', cb, ma)
+
+                # Reverse pair (B_0, A_-T1), auxiliaries on A_-T1.
+                d[reverse][ik][b0:b1, qa0:qa1] += reverse_phase * np.einsum('abq,ai->bqi', ca, ma)
+
         return d
+
 
     def _build_h0(self, m, kpts, d):
         '''H0[T] = H_i^{nu_T Q_0,k}, retaining the bare and fitted terms.'''
+
         if not any(block.shape[1] for block in m):
             return {}
+
         cell, mol = self.cell, self._bare_mol
         auxmol = self.auxcell.to_mol()
         h0 = {}
@@ -366,6 +365,7 @@ class PARI(lib.StreamObject):
             for phase, mk in zip(phases, m))
         # Stream one external atom/image at a time.  Crucially, this AO-image
         # cluster is independent of pair_rcut: C=0 does not imply (Q|pair)=0.
+
         with mol.with_range_coulomb(-self.omega):
             for it, index in enumerate(self._bare_indices):
                 h0[index] = self._empty_intermediate(m)
@@ -408,11 +408,14 @@ class PARI(lib.StreamObject):
         auxiliary functions.  No occupied-orbital contraction is hidden in
         an AO density contraction or a Bloch three-center tensor.
         '''
+
         self._ensure_built()
         kpts = _as_kpts(self.kpts if kpts is None else kpts).copy()
+
         m = self._format_m(m, kpts)
         d = self._build_d(m, kpts)
         h0 = self._build_h0(m, kpts, d)
+
         return PARIIntermediates(kpts, self.cell.lattice_vectors(), m,
                                  self.auxcell.nao_nr(), d, h0, self._build_token)
 
@@ -428,20 +431,20 @@ class PARI(lib.StreamObject):
         if data.token is not self._build_token:
             raise ValueError('Intermediates belong to a different PARI build')
         nao = self.cell.nao_nr()
-        l_real = {}
+        L_realspace = {}
         for u, du in data.d.items():
             phases = np.exp(-1j * data.kpts.dot(np.dot(u, data.lattice)))
             for t, ht in data.h0.items():
                 output = tuple(np.asarray(u) + t)
-                if output not in l_real:
-                    l_real[output] = np.zeros((nao, nao), dtype=complex)
+                if output not in L_realspace:
+                    L_realspace[output] = np.zeros((nao, nao), dtype=complex)
                 for dk, hk, phase in zip(du, ht, phases):
                     # This is H_i^{nu_(U+t) Q_U,k}, with the actual Q image.
                     h_image = phase * hk
-                    l_real[output] += np.einsum('mqi,nqi->mn', dk.conj(), h_image)
-        if not l_real:
-            l_real[(0, 0, 0)] = np.zeros((nao, nao), dtype=complex)
-        return {t: value / len(data.kpts) for t, value in l_real.items()}
+                    L_realspace[output] += np.einsum('mqi,nqi->mn', dk.conj(), h_image)
+        if not L_realspace:
+            L_realspace[(0, 0, 0)] = np.zeros((nao, nao), dtype=complex)
+        return {t: value / len(data.kpts) for t, value in L_realspace.items()}
 
     @staticmethod
     def get_k_realspace(l_real):
@@ -475,6 +478,7 @@ class PARI(lib.StreamObject):
 
     def get_k_from_mo(self, mo_coeff, mo_occ, kpts=None, kpts_band=None):
         '''Use M[k]=mo_coeff[k].conj()*sqrt(mo_occ[k]), including fractions.'''
+
         kpts = _as_kpts(self.kpts if kpts is None else kpts)
         coeff = self._format_m(mo_coeff, kpts)
         occupations = _kpoint_blocks(mo_occ, 1)
@@ -492,9 +496,8 @@ class PARI(lib.StreamObject):
         '''P=U w U^dagger -> M=U.conj()*sqrt(w), with no signed fallback.'''
         m = []
         for dm in density:
-            if not np.allclose(dm, dm.conj().T, rtol=1e-10, atol=1e-12):
-                raise ValueError('The supplied PARI equations require Hermitian densities')
             w, u = linalg.eigh((dm + dm.conj().T) * 0.5)
+
             tolerance = 100 * np.finfo(float).eps * dm.shape[0] * max(1., abs(w).max())
             if w[0] < -tolerance:
                 raise ValueError('The factorization P=M* M^T requires a positive-semidefinite density')
