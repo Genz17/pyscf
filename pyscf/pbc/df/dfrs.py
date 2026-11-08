@@ -34,18 +34,19 @@ def _pair_list(cell, kmesh, threshold):
         pairs.extend((i, j, m)
                      for i in range(ao_loc[ish], ao_loc[ish+1])
                      for j in range(ao_loc[jsh], ao_loc[jsh+1]))
-        shells.append((ish, jsh + m*cell.nbas, p0, len(pairs)))
+        shells.append((ish, jsh + m*cell.nbas, p0, len(pairs))) # (ish at 0, jsh at m, p0, p1), covered AO of paris[p0:p1]
     return np.asarray(pairs, dtype=np.int32).reshape(-1, 3), shells
 
 
 def _int3c_kernel(cell, auxcell, eta):
     '''Periodic SR integrals, including both AO image sums about each auxiliary.'''
+
     builder = incore.Int3cBuilder(cell, auxcell)
     builder.rs_cell = ft_ao._RangeSeparatedCell.from_cell(cell)
     builder.bvk_kmesh = np.ones(3, dtype=int)
     rcut = rsdf_builder.estimate_rcut(builder.rs_cell, auxcell, eta)
-    builder.supmol = ft_ao.ExtendedMole.from_cell(
-        builder.rs_cell, builder.bvk_kmesh, rcut.max()).strip_basis(rcut)
+    builder.supmol = ft_ao.ExtendedMole.from_cell(builder.rs_cell, builder.bvk_kmesh, rcut.max()).strip_basis(rcut)
+
     builder.supmol.omega = -eta
     return builder.gen_int3c_kernel(aosym='s1', return_complex=True)
 
@@ -55,8 +56,7 @@ def _ft_kernel(cell):
     rcut = ft_ao.estimate_rcut(rs_cell)
     supmol = ft_ao.ExtendedMole.from_cell(rs_cell, [1, 1, 1], rcut.max())
     supmol = supmol.strip_basis(rcut)
-    return supmol.gen_ft_kernel(aosym='s1', return_complex=True,
-                               kpts=np.zeros((1, 3)))
+    return supmol.gen_ft_kernel(aosym='s1', return_complex=True, kpts=np.zeros((1, 3)))
 
 
 def _metric(mydf, scell, eta):
@@ -147,8 +147,8 @@ def _make_cderi(mydf, shells):
                 rho = ft(gv, shls_slice=shls).reshape(len(gv), p1-p0)
                 a[q] += weighted.dot(rho)
             a[q] = scipy.linalg.solve_triangular(chol[q], a[q], lower=True)
-        factors[:, :, p0:p1] = np.fft.ifftn(a.reshape(shape), axes=axes).reshape(
-            nk, naux, p1-p0)
+        factors[:, :, p0:p1] = np.fft.ifftn(a.reshape(shape), axes=axes).reshape(nk, naux, p1-p0)
+
     return np.asarray(np.real_if_close(factors), order='C')
 
 
@@ -166,7 +166,7 @@ def _get_j(mydf, dm):
 def _get_k(mydf, dm):
     '''Two sparse-pair contractions; batch Q and one auxiliary cell t at a time.'''
 
-    b = mydf._cderi
+    b = mydf._cderi # ()
     nk, naux = b.shape[:2]
     nao = dm.shape[-1]
     diff = mydf._diff  # diff[s,t] = t-s modulo the BvK supercell
@@ -215,7 +215,7 @@ class GDF(df.GDF):
     def reset(self, cell=None):
         df.GDF.reset(self, cell)
         self.kpts = self.cell.make_kpts(self.kmesh, with_gamma_point=True)
-        self.pairs = self._diff = self._translations = None
+        self.pairs = self._diff = self._translations = None # diff[s,t] = t - s
         return self
 
     def has_kpts(self, kpts):
@@ -276,6 +276,7 @@ class GDF(df.GDF):
             raise ValueError('Density k-points must cover the fitted mesh')
         if kpts_band is not None and not self.has_kpts(kpts_band):
             raise NotImplementedError('Band k-points must belong to the fitted mesh')
+
         dm = np.asarray(dm)
         nao = dm.shape[-1]
         dms = dm.reshape(len(kpts), nao, nao)
