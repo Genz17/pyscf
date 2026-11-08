@@ -68,7 +68,7 @@ def _metric(mydf, scell, eta):
 
     naux = auxcell.nao_nr()
     precision = min(cell.precision*.01, 1e-12)
-    charge = ft_ao.ft_ao(auxcell, np.zeros((1, 3)))[0].real
+    charge = ft_ao.ft_ao(auxcell, np.zeros((1, 3)))[0].real # Fourier transformation of the AOs at G = 0
     if cell.omega <= 0:
         metric = np.asarray(rsdf_helper.intor_j2c(auxcell, eta, precision=precision, kpts=qpts), dtype=complex)
 
@@ -153,42 +153,44 @@ def _make_cderi(mydf, shells):
 
 
 def _get_j(mydf, dm):
-    '''Coulomb contraction in cell space; dm[x,d,i,j] uses exp(-ik.d).'''
+    '''Coulomb contraction in cell space; dm[d,i,j] uses exp(-ik.d).'''
     mu, nu, m = mydf.pairs.T
     negative = mydf._diff[:, 0]
     b = mydf._cderi.sum(axis=0)  # The charge density has q=0.
-    rho = np.einsum('ap,xp->xa', b, dm[:, negative[m], nu, mu])
+    rho = np.einsum('ap,p->a', b, dm[negative[m], nu, mu])
     j = np.zeros_like(dm)
-    j[:, m, mu, nu] = np.einsum('ap,xa->xp', b.conj(), rho)
+    j[m, mu, nu] = np.einsum('ap,a->p', b.conj(), rho)
     return j
 
 
 def _get_k(mydf, dm):
     '''Two sparse-pair contractions; batch Q and one auxiliary cell t at a time.'''
+
     b = mydf._cderi
     nk, naux = b.shape[:2]
-    nset, _, nao = dm.shape[:3]
+    nao = dm.shape[-1]
     diff = mydf._diff  # diff[s,t] = t-s modulo the BvK supercell
     negative = diff[:, 0]
     add = diff[negative]
     memory = max(1, mydf.max_memory - lib.current_memory()[0]) * 1e6
-    blksize = max(1, min(mydf.blockdim, int(memory / (32*nset*nk*nao**2))))
+    blksize = max(1, min(mydf.blockdim, int(memory / (32*nk*nao**2))))
     vk = np.zeros_like(dm)
     for a0, a1 in lib.prange(0, naux, blksize):
         for t in range(nk):
-            # T[x,s,mu,sigma,Q] for the current auxiliary cell and Q batch.
-            buf = np.zeros((nset, nk, nao, nao, a1-a0), dtype=complex)
+            # T[s,mu,sigma,Q] for the current auxiliary cell and Q batch.
+            buf = np.zeros((nk, nao, nao, a1-a0), dtype=complex)
             for p, (mu, lam, m) in enumerate(mydf.pairs):
-                buf[:, :, mu] += (dm[:, diff[m], lam, :, None] *
-                                  b[t, a0:a1, p].conj())
+                buf[:, mu] += (dm[diff[m], lam, :, None] * b[t, a0:a1, p].conj())
+
             for p, (sig, nu, m) in enumerate(mydf.pairs):
-                vk[:, :, :, nu][:, add[:, m]] += np.einsum(
-                    'xsia,sa->xsi', buf[:, :, :, sig], b[diff[:, t], a0:a1, p])
+                vk[add[:, m], :, nu] += np.einsum('sia,sa->si', buf[:, :, sig], b[diff[:, t], a0:a1, p])
+
     return vk
 
 
 class GDF(df.GDF):
     '''Global DF with in-memory, translation-covariant factors.
+        Assumes one density matrix per k-point (restricted HF).
         ``kmesh`` gives the three mesh dimensions (default 1, 1, 1).
         The unshifted k-points are generated with ``cell.make_kpts``.
         ``eta`` is the numerical Coulomb splitting parameter (default 0.4).
@@ -275,18 +277,19 @@ class GDF(df.GDF):
         if kpts_band is not None and not self.has_kpts(kpts_band):
             raise NotImplementedError('Band k-points must belong to the fitted mesh')
         dm = np.asarray(dm)
-        dms = df_jk._format_dms(dm, kpts)
+        nao = dm.shape[-1]
+        dms = dm.reshape(len(kpts), nao, nao)
         phase = np.exp(1j*kpts.dot(self._translations.T))
-        dm_r = np.einsum('kd,xkij->xdij', phase.conj(), dms) / len(kpts)
+        dm_r = np.einsum('kd,kij->dij', phase.conj(), dms) / len(kpts)
         # Match the single-k-point DF API when the band is the same point.
         single_kpt = single_kpt and (kpts_band is None or is_zero(kpts_band-kpts[0]))
         bands = kpts if single_kpt else df_jk._format_kpts_band(kpts_band, kpts)
         phase_out = np.exp(1j*bands.dot(self._translations.T))
 
         def to_kspace(v):
-            v = np.einsum('kd,xdij->xkij', phase_out, v)
+            v = np.einsum('kd,dij->kij', phase_out, v)
             if hermi == 1:
-                v = (v + v.conj().transpose(0, 1, 3, 2)) * .5
+                v = (v + v.conj().transpose(0, 2, 1)) * .5
             if is_zero(kpts) and is_zero(bands) and not np.iscomplexobj(dm):
                 v = v.real
             return v
@@ -295,13 +298,13 @@ class GDF(df.GDF):
         if with_j:
             vj = to_kspace(_get_j(self, dm_r))
             vj = (vj.reshape(dm.shape) if single_kpt else
-                  df_jk._format_jks(vj, dm, kpts_band, kpts))
+                  df_jk._format_jks(vj[None], dm, kpts_band, kpts))
         if with_k:
             vk = to_kspace(_get_k(self, dm_r))
             if exxdiv == 'ewald':
-                df_jk._ewald_exxdiv_for_G0(self.cell, kpts, dms, vk, bands)
+                df_jk._ewald_exxdiv_for_G0(self.cell, kpts, dms[None], vk[None], bands)
             vk = (vk.reshape(dm.shape) if single_kpt else
-                  df_jk._format_jks(vk, dm, kpts_band, kpts))
+                  df_jk._format_jks(vk[None], dm, kpts_band, kpts))
         return vj, vk
 
     # Use the AFT context manager, which supports both signs of omega.
