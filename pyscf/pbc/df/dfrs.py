@@ -8,6 +8,9 @@ from pyscf.pbc import tools
 from pyscf.pbc.df import aft, df, df_jk, ft_ao, incore, rsdf_builder, rsdf_helper
 from pyscf.pbc.tools import k2gamma
 from pyscf.pbc.lib.kpts_helper import is_zero, member
+import ctypes
+
+libpbc = lib.load_library('libpbc')
 
 
 def _pair_list(cell, kmesh, threshold):
@@ -158,32 +161,51 @@ def _get_j(mydf, dm):
     negative = mydf._diff[:, 0]
     b = mydf._cderi.sum(axis=0)  # The charge density has q=0.
     rho = np.einsum('ap,p->a', b, dm[negative[m], nu, mu])
-    j = np.zeros_like(dm)
-    j[m, mu, nu] = np.einsum('ap,a->p', b.conj(), rho)
-    return j
-
+    vj = np.zeros_like(dm)
+    vj[m, mu, nu] = np.einsum('ap,a->p', b.conj(), rho)
+    return vj
 
 def _get_k(mydf, dm):
-    '''Two sparse-pair contractions; batch Q and one auxiliary cell t at a time.'''
+    """Exchange contraction through the C kernel; dm is in cell space."""
 
-    b = mydf._cderi # ()
-    nk, naux = b.shape[:2]
-    nao = dm.shape[-1]
-    diff = mydf._diff  # diff[s,t] = t-s modulo the BvK supercell
-    negative = diff[:, 0]
-    add = diff[negative]
-    memory = max(1, mydf.max_memory - lib.current_memory()[0]) * 1e6
-    blksize = max(1, min(mydf.blockdim, int(memory / (32*nk*nao**2))))
-    vk = np.zeros_like(dm)
-    for a0, a1 in lib.prange(0, naux, blksize):
-        for t in range(nk):
-            # T[s,mu,sigma,Q] for the current auxiliary cell and Q batch.
-            buf = np.zeros((nk, nao, nao, a1-a0), dtype=complex)
-            for p, (mu, lam, m) in enumerate(mydf.pairs):
-                buf[:, mu] += (dm[diff[m], lam, :, None] * b[t, a0:a1, p].conj())
+    # Match the C kernel's element types and memory layout.
+    b = np.ascontiguousarray(mydf._cderi, dtype=np.complex128)
+    dm = np.ascontiguousarray(dm, dtype=np.complex128)
+    pairs = np.ascontiguousarray(mydf.pairs, dtype=np.intc)
+    diff = np.ascontiguousarray(mydf._diff, dtype=np.intc)
 
-            for p, (sig, nu, m) in enumerate(mydf.pairs):
-                vk[add[:, m], :, nu] += np.einsum('sia,sa->si', buf[:, :, sig], b[diff[:, t], a0:a1, p])
+    nk, naux, npair = b.shape
+    nao = dm.shape[1]
+    vk = np.empty((nk, nao, nao), dtype=np.complex128)
+
+    if nk == 0 or nao == 0 or naux == 0 or npair == 0:
+        vk.fill(0)
+        return vk
+
+    blockdim = int(mydf.blockdim)
+    if blockdim < 1:
+        raise ValueError('blockdim must be positive')
+
+    nthreads = max(1, lib.num_threads())
+    memory = max(1.0, mydf.max_memory - lib.current_memory()[0]) * 1e6
+
+    # Actual scratch uses 16 bytes per complex element.
+    # Use 32 here to leave some memory headroom.
+    bytes_per_aux = 32 * nthreads * nk * nao
+    blksize = max(1,min(nk * naux, blockdim, int(memory / bytes_per_aux)))
+
+    libpbc._get_k(
+        vk.ctypes.data_as(ctypes.c_void_p),
+        b.ctypes.data_as(ctypes.c_void_p),
+        dm.ctypes.data_as(ctypes.c_void_p),
+        pairs.ctypes.data_as(ctypes.c_void_p),
+        diff.ctypes.data_as(ctypes.c_void_p),
+        nk,
+        naux,
+        nao,
+        npair,
+        blksize,
+    )
 
     return vk
 
