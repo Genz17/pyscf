@@ -64,6 +64,7 @@ def _ft_kernel(cell):
 
 
 def _metric(mydf, scell, eta):
+
     '''Full metric and weighted auxiliary FTs, in canonical FFT momentum order.'''
 
     cell, auxcell = mydf.cell, mydf.auxcell
