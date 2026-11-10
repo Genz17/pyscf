@@ -255,7 +255,7 @@ class GDF(df.GDF):
         log.info('kmesh = %s, len(kpts) = %d', self.kmesh, len(self.kpts))
         return self
 
-    def build(self, j_only=None, with_j3c=True, kpts_band=None):
+    def build(self, j_only=None, with_j3c=True, kpts_band=None, mem_estimate = False):
         if self.cell.dimension != 3:
             raise NotImplementedError('Global DF currently requires dimension=3')
         if self.pair_threshold < 0 or self.eta <= 0:
@@ -272,11 +272,17 @@ class GDF(df.GDF):
         self._cderi = None
         self.auxcell = df.make_auxcell(self.cell, self.auxbasis)
 
+        if mem_estimate:
+            self.pairs, shells = _pair_list(self.cell, self.kmesh, self.pair_threshold)
+            logger.info(self, 'Retain %d / %d AO pairs', len(self.pairs), len(self.kpts)*self.cell.nao_nr()**2)
+            logger.info(self, 'Estimated CDERI memory (complex128): %.2f MiB', 16*len(self.kpts)*self.auxcell.nao_nr()*len(self.pairs)/1024**2)
+
         if with_j3c:
             cpu0 = logger.process_clock(), logger.perf_counter()
             self.pairs, shells = _pair_list(self.cell, self.kmesh, self.pair_threshold)
 
             logger.info(self, 'Retain %d / %d AO pairs', len(self.pairs), len(self.kpts)*self.cell.nao_nr()**2)
+            logger.info(self, 'Estimated CDERI memory (complex128): %.2f MiB', 16*len(self.kpts)*self.auxcell.nao_nr()*len(self.pairs)/1024**2)
 
             self._cderi = _make_cderi(self, shells)
             logger.timer(self, 'global DF build', *cpu0)
