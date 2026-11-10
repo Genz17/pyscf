@@ -20,17 +20,17 @@ def _pair_list(cell, kmesh, threshold):
         mask = np.ones((nk, cell.nbas, cell.nbas), dtype=bool)
     else:
         rs_cell = ft_ao._RangeSeparatedCell.from_cell(cell)
-        rcut = ft_ao.estimate_rcut(rs_cell, threshold)
+        rcut = ft_ao.estimate_rcut(rs_cell, threshold) # number of nbas of the unit cell, radius of shell-pair screening
         supmol = ft_ao.ExtendedMole.from_cell(rs_cell, kmesh, rcut.max())
-        supmol = supmol.strip_basis(rcut)
-        mask = supmol.get_ovlp_mask(threshold)
-        mask = lib.condense('np.any', mask, rs_cell.sh_loc, supmol.sh_loc)
+        supmol = supmol.strip_basis(rcut) # keep only shells remain in rcut[j]
+        mask = supmol.get_ovlp_mask(threshold) # of shape [cell.nbas, supermol.nbas], (i,J) where i is in the reference cell, J in the super mol
+        mask = lib.condense('np.any', mask, rs_cell.sh_loc, supmol.sh_loc) # of shape [nk, cell.nbas, cell.nbas]
         mask = mask.reshape(cell.nbas, nk, cell.nbas).transpose(1, 0, 2)
         # Include the translated reverse of every retained pair.
         negative = k2gamma.double_translation_indices(kmesh)[:, 0]
         mask = mask | (mask[negative].transpose(0, 2, 1))
 
-    ao_loc = cell.ao_loc_nr()
+    ao_loc = cell.ao_loc_nr() # AOs location of shells
     pairs, shells = [], []
     for m, ish, jsh in np.argwhere(mask):
         p0 = len(pairs)
@@ -55,6 +55,7 @@ def _int3c_kernel(cell, auxcell, eta):
 
 
 def _ft_kernel(cell):
+    # evaluates periodic AO FT
     rs_cell = ft_ao._RangeSeparatedCell.from_cell(cell)
     rcut = ft_ao.estimate_rcut(rs_cell)
     supmol = ft_ao.ExtendedMole.from_cell(rs_cell, [1, 1, 1], rcut.max())
@@ -67,7 +68,7 @@ def _metric(mydf, scell, eta):
 
     cell, auxcell = mydf.cell, mydf.auxcell
     kmesh = mydf.kmesh
-    qpts = cell.make_kpts(kmesh, wrap_around=True, with_gamma_point=True)
+    qpts = cell.make_kpts(kmesh, wrap_around=True)
 
     naux = auxcell.nao_nr()
     precision = min(cell.precision*.01, 1e-12)
